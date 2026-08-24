@@ -70,6 +70,7 @@ tailwind.config = {
 <div id="modal-root"></div>
 
 <!-- ================== Phase 2 Delivery Sources ================== -->
+<!-- ملاحظة مهمة: يمنع وضع أي تسلسل إغلاق سكربت داخل هذه الكتل حتى لا ينكسر التحليل -->
 <script type="text/plain" id="src-secrets">
 # ١) ثبّت مفاتيح الأسرار على مستوى الخادم فقط (لا تظهر في الفرونت أبدًا)
 supabase secrets set GEMINI_API_KEY=YOUR_GEMINI_API_KEY
@@ -415,7 +416,7 @@ async function extractByType(name: string, buf: Uint8Array): Promise<string> {
     const wb = XLSX.read(buf.slice().buffer, { type: "array" });
     let out = "";
     for (const sn of wb.SheetNames) {
-      out += `\n[${sn}]\n` + XLSX.utils.sheet_to_csv(wb.Sheets[sn]);
+      out += "\n[" + sn + "]\n" + XLSX.utils.sheet_to_csv(wb.Sheets[sn]);
     }
     return out;
   }
@@ -547,12 +548,12 @@ Deno.serve(async (req) => {
 <script type="text/plain" id="src-widgetjs">
 /* ============================================================
    عون AI — widget.js (ملف مستقل يُستضاف على CDN)
-   الاستخدام في موقع العميل:
-   <script src="https://cdn.YOUR-DOMAIN/widget.js"
-           data-widget-id="WIDGET_ID"
-           data-token="TOKEN"
-           data-api="https://YOUR-PROJECT.supabase.co/functions/v1"
-           async></script>
+   طريقة التضمين في موقع العميل:
+   أضف وسم سكربت يشير عبر src إلى هذا الملف مع السمات التالية:
+     data-widget-id="WIDGET_ID"
+     data-token="TOKEN"
+     data-api="https://YOUR-PROJECT.supabase.co/functions/v1"
+   ثم أغلق الوسم بشكل صحيح.
    - يقرأ الإعدادات الأحدث من الخادم عند كل تحميل صفحة (بدون كاش).
    - يتحقق من التوكن قبل قبول أي رسالة.
    - معزول بالكامل عبر Shadow DOM.
@@ -652,7 +653,6 @@ Deno.serve(async (req) => {
       var ava = h('div', 'aw-ava', '<img src="' + esc(s.avatar || cfg.agent.avatar || '') + '" alt="">' + (s.online ? '<span class="aw-dot"></span>' : ''));
       var info = h('div', null, '<div class="aw-name">' + esc(s.name) + '</div><div class="aw-status">' + (s.online ? 'متصل الآن' : 'غير متصل') + '</div>');
       head.appendChild(ava); head.appendChild(info);
-      if (s.logo) head.appendChild(h('img', 'aw-logo')).src !== undefined;
       if (s.logo) { var lg = h('img', 'aw-logo'); lg.src = s.logo; head.appendChild(lg); }
       var closeB = h('button', 'aw-close', '&#10005;'); closeB.type = 'button'; head.appendChild(closeB);
       panel.appendChild(head);
