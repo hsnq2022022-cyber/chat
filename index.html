@@ -12,6 +12,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans-arabic@5.0.0/500.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans-arabic@5.0.0/700.css">
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
 tailwind.config = {
   theme: { extend: {
@@ -58,6 +59,7 @@ tailwind.config = {
   .lbl{display:block;font-size:13px;color:#aeb6bf}
   .inp{width:100%;margin-top:6px;background:#1a1e24;border:1px solid #2b323b;border-radius:12px;padding:11px 14px;color:#f5f6f7;outline:none;transition:.2s}
   .inp:focus{border-color:#0ABAB5;box-shadow:0 0 0 3px rgba(10,186,181,.15)}
+  pre.codebox{direction:ltr;text-align:left;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.7;white-space:pre;overflow:auto;background:#0b0e12;border:1px solid #2b323b;border-radius:12px;padding:16px;color:#8aeae6;max-height:380px}
 </style>
 </head>
 <body class="antialiased">
@@ -74,15 +76,15 @@ const now=()=>Date.now();
 const DAY=864e5;
 const fmtDate=t=>new Intl.DateTimeFormat('ar',{day:'numeric',month:'short'}).format(t);
 const fmtTime=t=>new Intl.DateTimeFormat('ar',{hour:'numeric',minute:'2-digit'}).format(t);
-const timeAgo=t=>{const d=now()-t;if(d<0)t=now(),d=0;if(d<6e4)return 'الآن';if(d<36e5)return 'قبل '+Math.floor(d/6e4)+' د';if(d<DAY)return 'قبل '+Math.floor(d/36e5)+' س';return 'قبل '+Math.floor(d/DAY)+' يوم'};
+const timeAgo=t=>{const d=now()-t;if(d<6e4)return 'الآن';if(d<36e5)return 'قبل '+Math.floor(d/6e4)+' د';if(d<DAY)return 'قبل '+Math.floor(d/36e5)+' س';return 'قبل '+Math.floor(d/DAY)+' يوم'};
 const hashPw=s=>{let h=9;for(const c of String(s))h=Math.imul(h^c.charCodeAt(0),387420489);return 'h'+(h^h>>>9)};
 const norm=s=>String(s||'').replace(/[\u064B-\u0652\u0640]/g,'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').toLowerCase();
 const tokens=s=>norm(s).split(/[^\u0600-\u06FFa-z0-9]+/).filter(w=>w.length>2);
-function md(s){let t=esc(s);t=t.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');t=t.replace(/\[(.+?)\]\((.+?)\)/g,'<a class="underline text-tiffany-400" target="_blank" rel="noopener" href="$2">$1</a>');t=t.replace(/(^|\n)- (.+)/g,'$1<span class="block pr-3">$2</span>');return t.replace(/\n/g,'<br>')}
-function toast(msg,type){const c=$('#toasts');if(!c)return;const el=document.createElement('div');el.className='fadeUp glass rounded-xl px-4 py-3 text-sm flex items-center gap-2 shadow-soft '+(type==='err'?'!border-red-500/40 text-red-300':type==='ok'?'!border-tiffany-500/40 text-tiffany-300':'text-ink-100');el.innerHTML=(type==='err'?'⚠️':type==='ok'?'✅':'ℹ️')+'<span>'+esc(msg)+'</span>';c.appendChild(el);setTimeout(()=>{el.style.opacity='0';el.style.transition='.4s';setTimeout(()=>el.remove(),400)},3200)}
+function md(s){let t=esc(s);t=t.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');t=t.replace(/\[(.+?)\]\((.+?)\)/g,'<a class="underline text-tiffany-400" target="_blank" rel="noopener" href="$2">$1</a>');return t.replace(/\n/g,'<br>')}
+function toast(msg,type){const c=$('#toasts');if(!c)return;const el=document.createElement('div');el.className='fadeUp glass rounded-xl px-4 py-3 text-sm flex items-center gap-2 shadow-soft '+(type==='err'?'!border-red-500/40 text-red-300':type==='ok'?'!border-tiffany-500/40 text-tiffany-300':'text-ink-100');el.innerHTML=(type==='err'?'⚠️':type==='ok'?'✅':'ℹ️')+'<span>'+esc(msg)+'</span>';c.appendChild(el);setTimeout(()=>{el.style.opacity='0';el.style.transition='.4s';setTimeout(()=>el.remove(),400)},3400)}
 function copyText(t){const done=()=>toast('تم النسخ إلى الحافظة','ok');
- if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done).catch(()=>fallbackCopy(t,done))}else fallbackCopy(t,done);
- function fallbackCopy(x,cb){const ta=document.createElement('textarea');ta.value=x;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy')}catch(e){}ta.remove();cb()}}
+ if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done).catch(()=>fbCopy(t,done))}else fbCopy(t,done);
+ function fbCopy(x,cb){const ta=document.createElement('textarea');ta.value=x;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy')}catch(e){}ta.remove();cb()}}
 function beep(){try{const c=new (window.AudioContext||window.webkitAudioContext)();const o=c.createOscillator(),g=c.createGain();o.frequency.value=880;g.gain.value=.04;o.connect(g);g.connect(c.destination);o.start();o.stop(c.currentTime+.12)}catch(e){}}
 
 /* ================= Icons ================= */
@@ -111,7 +113,8 @@ check:'<path d="m5 13 4 4L19 7"/>',
 menu:'<path d="M4 7h16M4 12h16M4 17h16"/>',
 out:'<path d="M15 12H4m0 0 3-3m-3 3 3 3"/><path d="M9 4h10v16H9"/>',
 search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
-doc:'<path d="M6 2h8l5 5v15H6z"/><path d="M14 2v5h5M9 13h6M9 17h6"/>'
+doc:'<path d="M6 2h8l5 5v15H6z"/><path d="M14 2v5h5M9 13h6M9 17h6"/>',
+db:'<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>'
 };
 const icon=(n,c)=>'<svg class="'+(c||'w-5 h-5')+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+IC[n]+'</svg>';
 
@@ -125,13 +128,25 @@ free:{name:'البداية',price:0,agents:3,msgs:500,feat:['1 Widget لكل Age
 growth:{name:'النمو',price:99,agents:10,msgs:5000,feat:['حتى 10 Agents','5,000 رسالة AI شهريًا','Knowledge Base متقدمة + RAG','إزالة شعار عون','تحويل لموظف (Handoff)','تحليلات متقدمة']},
 pro:{name:'الاحترافي',price:299,agents:999,msgs:50000,feat:['Agents غير محدودين','50,000 رسالة AI شهريًا','API كامل + Webhooks','أولوية دعم + SLA','نماذج AI متعددة','تصدير البيانات']}};
 
-/* ================= DB ================= */
+/* ================= Supabase Layer ================= */
+let cfg=null;try{cfg=JSON.parse(localStorage.getItem('aown_cfg'))}catch(e){}
+let sb=null, remoteUser=null, remoteBroken=false;
+function sbClient(){
+ if(!cfg||!cfg.url||!cfg.key)return null;
+ if(!window.supabase)return null;
+ if(!sb){try{sb=window.supabase.createClient(cfg.url,cfg.key)}catch(e){return null}}
+ return sb}
+const isRemote=()=>!!sbClient();
+
+/* ================= Local DB (mirror / demo) ================= */
 const LS='aown_db_v1';
 let db;
 function loadDB(){try{db=JSON.parse(localStorage.getItem(LS))}catch(e){db=null}
- if(!db||typeof db!=='object'){db={users:[],session:null,ws:null};save()}}
-function save(){try{localStorage.setItem(LS,JSON.stringify(db))}catch(e){toast('تعذر الحفظ في هذا المتصفح','err')}}
-const me=()=>db.users.find(u=>u.id===db.session);
+ if(!db||typeof db!=='object'){db={users:[],session:null,ws:null};persist()}}
+function persist(){try{localStorage.setItem(LS,JSON.stringify(db))}catch(e){}}
+function me(){
+ if(isRemote())return remoteUser?{id:remoteUser.id,name:((remoteUser.email||'مستخدم').split('@')[0]),email:remoteUser.email}:null;
+ return db.users.find(u=>u.id===db.session)}
 const ws=()=>db.ws;
 
 function defWidget(agentId,name){return {id:uid('w_'),agentId,name,token:uid('tk_'),enabled:true,primary:'#0ABAB5',secondary:'#0b514f',radius:16,width:360,height:520,position:'bottom-left',avatar:'',logo:'',welcome:'',placeholder:'اكتب رسالتك...',online:true,typing:true,autoOpen:false,delay:3,badge:true,sound:false,mobile:'panel',createdAt:now()}}
@@ -164,7 +179,49 @@ function starterKit(){
   plan:'free',usage:{ai:0},invoices:[{id:uid('inv_'),plan:'البداية',amount:0,date:now()-13*DAY,status:'مدفوعة'}]};
 }
 
-/* ================= AI Engine (RAG-like) ================= */
+/* ================= Remote sync (Supabase) ================= */
+let pushTimer=null;
+function save(){
+ persist();
+ if(isRemote()&&!remoteBroken&&db.ws&&db.ws.__wid){
+   clearTimeout(pushTimer);
+   pushTimer=setTimeout(()=>{pushTables(sbClient(),db.ws.__wid,db.ws).catch(err=>{
+     if(!remoteBroken){remoteBroken=true;toast('انقطعت المزامنة مع الخادم — تم الحفظ محليًا مؤقتًا','err');console.error(err)}
+   })},700);
+ }}
+async function pushTables(c,wid,s){
+ const T={agents:s.agents,widgets:s.widgets,knowledge_docs:s.kb,contacts:s.contacts,conversations:s.convos,invoices:s.invoices};
+ for(const t in T){
+   const {error:e1}=await c.from(t).delete().eq('workspace_id',wid);
+   if(e1)throw e1;
+   if(T[t]&&T[t].length){
+     const {error:e2}=await c.from(t).insert(T[t].map(x=>({id:x.id,workspace_id:wid,data:x})));
+     if(e2)throw e2;
+   }
+ }
+ const {error:e3}=await c.from('workspaces').update({name:s.settings.name,type:s.settings.type,lang:s.settings.lang,tz:s.settings.tz,team:s.settings.team,plan:s.plan,usage_ai:s.usage.ai}).eq('id',wid);
+ if(e3)throw e3;
+}
+async function loadRemote(){
+ const c=sbClient();if(!c||!remoteUser)return false;
+ let {data:wsRow,error}=await c.from('workspaces').select('*').eq('owner_id',remoteUser.id).maybeSingle();
+ if(error){if(/permission|policy/i.test(error.message)){toast('خطأ صلاحيات — تأكد من تفعيل سياسات RLS في المخطط','err')}else{toast('تعذر الاتصال بقاعدة البيانات','err')}return false}
+ if(!wsRow){wsRow=await provisionRemote(c);if(!wsRow)return false}
+ db.ws={__wid:wsRow.id,settings:{name:wsRow.name||'مساحة عمل',type:wsRow.type||'',lang:wsRow.lang||'العربية',tz:wsRow.tz||'Asia/Riyadh',team:wsRow.team||[]},plan:wsRow.plan||'free',usage:{ai:wsRow.usage_ai||0},agents:[],widgets:[],kb:[],contacts:[],convos:[],invoices:[]};
+ const tabs=[['agents','agents'],['widgets','widgets'],['knowledge_docs','kb'],['contacts','contacts'],['conversations','convos'],['invoices','invoices']];
+ for(const p of tabs){const {data}=await c.from(p[0]).select('data').eq('workspace_id',wsRow.id);db.ws[p[1]]=(data||[]).map(r=>r.data)}
+ db.ws.convos.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+ return true;
+}
+async function provisionRemote(c){
+ const kit=starterKit();
+ const {data:wsRow,error}=await c.from('workspaces').insert({owner_id:remoteUser.id,name:kit.settings.name,type:kit.settings.type,lang:kit.settings.lang,tz:kit.settings.tz,team:kit.settings.team,plan:'free',usage_ai:0}).select().single();
+ if(error){toast('تعذر إنشاء مساحة العمل: '+error.message,'err');return null}
+ await pushTables(c,wsRow.id,kit);
+ return wsRow;
+}
+
+/* ================= AI Engine ================= */
 const DEMO_TEXTS=['سماعة بلوتوث برو بسعر 199 ريال.\nشاحن سريع 45 واط بسعر 89 ريال.\nعرض الباندل: سماعة + شاحن بسعر 259 ريال.','التوصيل داخل الرياض خلال 24 ساعة برسوم 15 ريال.\nالشحن مجاني للطلبات فوق 200 ريال.','يمكن استرجاع المنتج خلال 14 يومًا بحالته الأصلية.','الدوام من السبت إلى الخميس، 9 صباحًا حتى 6 مساءً.'];
 function demoDocs(){return DEMO_TEXTS.map(t=>({chunks:t.split('\n').map(s=>({text:s,toks:tokens(s)}))}))}
 function searchKB(q){const qt=tokens(q);if(!qt.length)return[];const hits=[];
@@ -187,7 +244,6 @@ function aiRespond(text,agent){
 function widgetMarkup(w,agent,opts){
  opts=opts||{};
  const name=w.name||((agent&&agent.name)||'مساعدك الذكي');
- const welcome=w.welcome||((agent&&agent.welcome)||'أهلًا بك 👋 كيف أقدر أساعدك؟');
  const r=w.radius||16;
  const credit=opts.credit&&(!ws()||ws().plan==='free');
  const W=Math.min(w.width||360,420),H=Math.min(w.height||520,640);
@@ -279,6 +335,7 @@ function route(){
    else if(h==='#/login')renderAuth('login');
    else if(h==='#/signup')renderAuth('signup');
    else if(h==='#/forgot')renderAuth('forgot');
+   else if(h.indexOf('#/setup')===0)renderSetup();
    else if(h.indexOf('#/test')===0)renderTest();
    else renderLanding();
  }catch(err){console.error(err);$('#app').innerHTML='<div class="p-20 text-center text-ink-400">حدث خطأ غير متوقع. <a class="text-tiffany-400 underline" href="#/">العودة للرئيسية</a></div>'}
@@ -299,7 +356,6 @@ function renderLanding(){
  +'<div class="flex items-center gap-2">'
  +(me()?'<button data-action="go" data-to="#/app" class="btn-primary">لوحة التحكم</button>':'<button data-action="go" data-to="#/login" class="px-4 py-2 text-sm text-ink-200 hover:text-white">تسجيل الدخول</button><button data-action="go" data-to="#/signup" class="btn-primary">ابدأ مجانًا</button>')
  +'</div></div></header>'
-
  +'<section class="relative z-10 max-w-7xl mx-auto px-4 pt-14 pb-20 grid lg:grid-cols-2 gap-12 items-center">'
  +'<div class="fadeUp">'
  +'<div class="inline-flex items-center gap-2 text-xs text-tiffany-300 bg-tiffany-500/10 border border-tiffany-500/30 rounded-full px-3 py-1.5 mb-5">'+icon('spark','w-4 h-4')+' منصة موظفي الذكاء الاصطناعي للأعمال</div>'
@@ -314,7 +370,6 @@ function renderLanding(){
  +'<span class="flex items-center gap-1.5">'+icon('check','w-4 h-4 text-tiffany-500')+' يعمل مع WordPress و Shopify وأي موقع</span>'
  +'<span class="flex items-center gap-1.5">'+icon('shield','w-4 h-4 text-tiffany-500')+' المفاتيح والأسرار لا تغادر الخادم</span>'
  +'</div></div>'
-
  +'<div class="relative fadeUp">'
  +'<div class="glass rounded-2xl p-4 shadow-soft">'
  +'<div class="flex items-center gap-1.5 pb-3 border-b border-ink-800 mb-3"><span class="w-2.5 h-2.5 rounded-full bg-red-400"></span><span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span><span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span><span class="ltr text-[11px] text-ink-500 px-2 font-mono">your-store.com</span></div>'
@@ -327,19 +382,16 @@ function renderLanding(){
  +'</div></div>'
  +'<div class="absolute -z-10 -top-10 -left-10 w-64 h-64 bg-tiffany-500/20 blur-3xl rounded-full"></div>'
  +'</div></section>'
-
  +'<section id="how" class="relative z-10 max-w-7xl mx-auto px-4 py-20">'
  +'<h2 class="sec-title">كيف يعمل؟</h2><p class="sec-sub">أربع خطوات من التسجيل إلى موظف AI يتحدث مع عملائك.</p>'
  +'<div class="grid md:grid-cols-4 gap-5 mt-10">'
  +[['bot','أنشئ Agent','حدد الاسم والتعليمات ونبرة الحديث ونموذج الذكاء الاصطناعي.'],['book','أضف المعرفة','ارفع ملفات أو روابط موقعك ليعتمد عليها الـ AI بدقة دون اختلاق.'],['widget','خصّص الويدجت','ألوان وشعار ورسالة ترحيب مع معاينة حية فورية.'],['code','انسخ الكود','سطر واحد في أي موقع — وتبدأ المحادثات بالوصول للوحة التحكم.']].map(function(s,i){return '<div class="glass rounded-2xl p-6 hover:border-tiffany-500/40 transition relative"><div class="absolute top-4 left-4 font-display font-extrabold text-ink-700 text-2xl">'+(i+1)+'</div><div class="w-11 h-11 rounded-xl bg-tiffany-500/10 text-tiffany-400 border border-tiffany-500/30 flex items-center justify-center mb-4">'+icon(s[0])+'</div><h3 class="font-display font-bold mb-2">'+s[1]+'</h3><p class="text-sm text-ink-400 leading-6">'+s[2]+'</p></div>'}).join('')
  +'</div></section>'
-
  +'<section id="features" class="relative z-10 bg-ink-900/60 border-y border-ink-800 py-20"><div class="max-w-7xl mx-auto px-4">'
  +'<h2 class="sec-title">مميزات بمستوى عالمي</h2><p class="sec-sub">كل ما تحتاجه لتشغيل موظفين رقميين على موقعك.</p>'
  +'<div class="grid md:grid-cols-3 gap-5 mt-10">'
- +[['chat','محادثات حية وسياق كامل','الـ AI يتذكر سياق المحادثة ويرد بشكل طبيعي وقصير.'],['book','Knowledge Base + RAG','استرجاع ذكي للمعلومة المناسبة فقط — لا إرسال كل شيء في كل رسالة.'],['bolt','أتمتة خلفية صامتة','محرك أتمتة يعالج الرسائل ويحفظ المحادثات دون أن يرى العميل أي تعقيد.'],['shield','أمان Multi-Tenant','كل مساحة عمل معزولة تمامًا، ومفاتيح الذكاء الاصطناعي لا تلمس المتصفح أبدًا.'],['users','تحويل لموظف بشري','عند الحاجة، تنتقل المحادثة لفريقك مع كامل التاريخ.'],['chart','تحليلات واستخدام','رسائل، عملاء، معدلات استخدام AI — في لوحة واحدة.']].map(function(f){return '<div class="rounded-2xl p-6 bg-ink-850 border border-ink-800 hover:border-tiffany-500/40 hover:-translate-y-0.5 transition"><div class="w-10 h-10 rounded-lg bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center mb-4">'+icon(f[0])+'</div><h3 class="font-display font-bold mb-1.5">'+f[1]+'</h3><p class="text-sm text-ink-400 leading-6">'+f[2]+'</p></div>'}).join('')
+ +[['chat','محادثات حية وسياق كامل','الـ AI يتذكر سياق المحادثة ويرد بشكل طبيعي وقصير.'],['book','Knowledge Base + RAG','استرجاع ذكي للمعلومة المناسبة فقط — لا إرسال كل شيء في كل رسالة.'],['bolt','أتمتة خلفية صامتة','محرك أتمتة يعالج الرسائل ويحفظ المحادثات دون أن يرى العميل أي تعقيد.'],['shield','أمان Multi-Tenant','كل مساحة عمل معزولة تمامًا عبر Supabase RLS، ومفاتيح الذكاء الاصطناعي لا تلمس المتصفح أبدًا.'],['users','تحويل لموظف بشري','عند الحاجة، تنتقل المحادثة لفريقك مع كامل التاريخ.'],['chart','تحليلات واستخدام','رسائل، عملاء، معدلات استخدام AI — في لوحة واحدة.']].map(function(f){return '<div class="rounded-2xl p-6 bg-ink-850 border border-ink-800 hover:border-tiffany-500/40 hover:-translate-y-0.5 transition"><div class="w-10 h-10 rounded-lg bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center mb-4">'+icon(f[0])+'</div><h3 class="font-display font-bold mb-1.5">'+f[1]+'</h3><p class="text-sm text-ink-400 leading-6">'+f[2]+'</p></div>'}).join('')
  +'</div></div></section>'
-
  +'<section class="max-w-7xl mx-auto px-4 py-20 grid lg:grid-cols-2 gap-10 items-center">'
  +'<div><h2 class="sec-title !text-3xl !text-right">ويدجت يعيش داخل موقعك</h2>'
  +'<p class="text-ink-300 leading-8 mt-3 mb-6">معزول تمامًا عبر Shadow DOM فلا يتأثر بتصميم موقعك ولا يؤثر عليه. يعمل على WordPress و Shopify و Next.js وأي موقع يسمح بسطر JavaScript.</p>'
@@ -355,13 +407,11 @@ function renderLanding(){
  +'</div>'
  +'<p class="text-xs text-ink-500 mt-4 leading-6">تُعالج الملفات وتُقسّم لمقاطع، ويسترجع الـ AI المقطع المناسب فقط عند الحاجة — فلا يخترع أسعارًا ولا منتجات ولا مواعيد.</p>'
  +'</div></section>'
-
  +'<section id="usecases" class="bg-ink-900/60 border-y border-ink-800 py-20"><div class="max-w-7xl mx-auto px-4">'
  +'<h2 class="sec-title">لمن بُنيت عون؟</h2><p class="sec-sub">أي نشاط يريد الرد الفوري على عملائه — على مدار الساعة.</p>'
  +'<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-10">'
  +['المتاجر الإلكترونية','الشركات','العيادات','المطاعم','الصالونات','العقارات','مكاتب الخدمات','مراكز التدريب'].map(function(u){return '<div class="rounded-xl bg-ink-850 border border-ink-800 p-5 text-center text-sm text-ink-200 hover:border-tiffany-500/40 hover:text-tiffany-300 transition">'+u+'</div>'}).join('')
  +'</div></div></section>'
-
  +'<section id="pricing" class="max-w-7xl mx-auto px-4 py-20">'
  +'<h2 class="sec-title">أسعار واضحة</h2><p class="sec-sub">ابدأ مجانًا، وترقَّ عندما تكبر.</p>'
  +'<div class="grid md:grid-cols-3 gap-5 mt-10">'
@@ -372,13 +422,11 @@ function renderLanding(){
  +'<ul class="space-y-2.5 text-sm text-ink-300 mb-7">'+p.feat.map(function(f){return '<li class="flex gap-2">'+icon('check','w-4 h-4 text-tiffany-500 mt-0.5')+' '+f+'</li>'}).join('')+'</ul>'
  +'<button data-action="go" data-to="#/signup" class="'+(k==='growth'?'btn-primary':'btn-ghost')+' w-full">'+(k==='free'?'ابدأ مجانًا':'اشترك')+'</button></div>'}).join('')
  +'</div></section>'
-
  +'<section id="faq" class="max-w-4xl mx-auto px-4 pb-20">'
  +'<h2 class="sec-title">الأسئلة الشائعة</h2>'
  +'<div class="mt-8 space-y-3">'
- +[['هل يحتاج موقعي تقنية معينة؟','لا. سطر JavaScript واحد يعمل على WordPress و Shopify وأي موقع HTML أو React أو Next.js.'],['هل تظهر تفاصيل الذكاء الاصطناعي أو الأتمتة لعملائي؟','إطلاقًا. عملاؤك يرون ويدجت أنيقًا فقط، بينما تعمل كل البنية خلف API آمن دون كشف أي مفاتيح أو روابط داخلية.'],['كيف يتجنب الـ AI اختلاق المعلومات؟','يعتمد على قاعدة المعرفة الخاصة بك فقط عبر الاسترجاع (RAG)، وإذا لم يجد معلومة يؤكد ذلك أو يحوّل لموظف.'],['ماذا يحدث عندما يطلب العميل موظفًا بشريًا؟','تتغير حالة المحادثة تلقائيًا إلى Human Handoff وتظهر فورًا في لوحة التحكم مع كامل التاريخ.'],['هل بياناتي معزولة عن باقي العملاء؟','نعم، بنية Multi-Tenant تربط كل سجل بمساحة عملك فقط، وأي وصول خارجي يُرفض.'],['هل يمكنني تخصيص شكل الويدجت؟','بالكامل: الألوان والزوايا والأبعاد والشعار والرسائل والسلوك، مع معاينة حية قبل النشر.']].map(function(f){return '<details class="faq glass rounded-xl group"><summary class="flex items-center justify-between cursor-pointer px-5 py-4 font-semibold text-sm list-none">'+f[0]+'<span class="text-tiffany-400 transition group-open:rotate-45 text-xl leading-none">+</span></summary><p class="px-5 pb-5 text-sm text-ink-400 leading-7">'+f[1]+'</p></details>'}).join('')
+ +[['هل يحتاج موقعي تقنية معينة؟','لا. سطر JavaScript واحد يعمل على WordPress و Shopify وأي موقع HTML أو React أو Next.js.'],['هل تظهر تفاصيل الذكاء الاصطناعي أو الأتمتة لعملائي؟','إطلاقًا. عملاؤك يرون ويدجت أنيقًا فقط، بينما تعمل كل البنية خلف API آمن دون كشف أي مفاتيح أو روابط داخلية.'],['كيف يتجنب الـ AI اختلاق المعلومات؟','يعتمد على قاعدة المعرفة الخاصة بك فقط عبر الاسترجاع (RAG)، وإذا لم يجد معلومة يؤكد ذلك أو يحوّل لموظف.'],['ماذا يحدث عندما يطلب العميل موظفًا بشريًا؟','تتغير حالة المحادثة تلقائيًا إلى Human Handoff وتظهر فورًا في لوحة التحكم مع كامل التاريخ.'],['هل بياناتي معزولة عن باقي العملاء؟','نعم، بنية Multi-Tenant مع سياسات أمان على مستوى قاعدة البيانات تربط كل سجل بمساحة عملك فقط.'],['هل يمكنني تخصيص شكل الويدجت؟','بالكامل: الألوان والزوايا والأبعاد والشعار والرسائل والسلوك، مع معاينة حية قبل النشر.']].map(function(f){return '<details class="faq glass rounded-xl group"><summary class="flex items-center justify-between cursor-pointer px-5 py-4 font-semibold text-sm list-none">'+f[0]+'<span class="text-tiffany-400 transition group-open:rotate-45 text-xl leading-none">+</span></summary><p class="px-5 pb-5 text-sm text-ink-400 leading-7">'+f[1]+'</p></details>'}).join('')
  +'</div></section>'
-
  +'<section class="max-w-5xl mx-auto px-4 pb-24">'
  +'<div class="rounded-3xl p-10 md:p-14 text-center relative overflow-hidden border border-tiffany-500/30 bg-gradient-to-b from-tiffany-500/15 to-transparent">'
  +'<h2 class="font-display font-extrabold text-3xl md:text-4xl mb-4">جاهز توظّف أول موظف AI لديك؟</h2>'
@@ -389,12 +437,10 @@ function renderLanding(){
  +'<div class="flex items-center justify-center gap-2 mb-3">'+logoSVG()+' عون AI</div>'
  +'منصة سعودية لإدارة موظفي الذكاء الاصطناعي — كل الحقوق محفوظة '+new Date().getFullYear()
  +'</footer>';
-
  var demoW=defWidget('','مساعد النخبة');
  demoW.width=300;demoW.height=340;demoW.radius=14;demoW.avatar=AV[0];demoW.badge=true;
  var heroAgent={name:'مساعد النخبة',welcome:'أهلًا بك في متجر النخبة 👋 اسألني عن الأسعار أو الشحن.',fallback:'ما عندي معلومة مؤكدة، أقدر أحولك لموظف.',avatar:AV[0]};
- var heroHost=$('#hero-widget .pointer-events-auto');
- mountWidget(heroHost,demoW,heroAgent,{fixed:false,credit:false});
+ mountWidget($('#hero-widget .pointer-events-auto'),demoW,heroAgent,{fixed:false,credit:false});
 }
 
 /* ================= Auth ================= */
@@ -405,7 +451,7 @@ function renderAuth(mode){
   +'<label class="lbl">البريد الإلكتروني<input name="email" type="email" required class="inp" placeholder="you@company.com"></label>'
   +'<label class="lbl">كلمة المرور<input name="pass" type="password" required class="inp" placeholder="••••••••"></label>'
   +'<div class="flex items-center justify-between text-sm"><a href="#/forgot" class="text-tiffany-400 hover:underline">نسيت كلمة المرور؟</a></div>'
-  +'<button class="btn-primary w-full !py-3">تسجيل الدخول</button>'
+  +'<button class="btn-primary w-full !py-3" id="b-login">تسجيل الدخول</button>'
   +'<p class="text-sm text-ink-400 text-center">ليس لديك حساب؟ <a class="text-tiffany-400 font-semibold" href="#/signup">أنشئ حسابًا</a></p></form>';
  if(mode==='signup')form='<form id="f-signup" class="space-y-4">'
   +'<label class="lbl">الاسم الكامل<input name="name" required class="inp" placeholder="اسمك"></label>'
@@ -413,12 +459,15 @@ function renderAuth(mode){
   +'<label class="lbl">نوع النشاط<select name="type" class="inp">'+['متجر إلكتروني','شركة','عيادة','مطعم','صالون','عقارات','مكتب خدمات','مركز تدريب','أخرى'].map(function(t){return '<option>'+t+'</option>'}).join('')+'</select></label>'
   +'<label class="lbl">البريد الإلكتروني<input name="email" type="email" required class="inp" placeholder="you@company.com"></label>'
   +'<label class="lbl">كلمة المرور<input name="pass" type="password" minlength="6" required class="inp" placeholder="6 أحرف على الأقل"></label>'
-  +'<button class="btn-primary w-full !py-3">إنشاء الحساب والبدء</button>'
+  +'<button class="btn-primary w-full !py-3" id="b-signup">إنشاء الحساب والبدء</button>'
   +'<p class="text-sm text-ink-400 text-center">لديك حساب؟ <a class="text-tiffany-400 font-semibold" href="#/login">سجّل دخولك</a></p></form>';
  if(mode==='forgot')form='<form id="f-forgot" class="space-y-4">'
   +'<label class="lbl">البريد الإلكتروني<input name="email" type="email" required class="inp" placeholder="you@company.com"></label>'
   +'<button class="btn-primary w-full !py-3">إرسال رابط الاستعادة</button>'
   +'<p class="text-sm text-ink-400 text-center"><a class="text-tiffany-400" href="#/login">العودة لتسجيل الدخول</a></p></form>';
+ var modeBadge=isRemote()
+  ?'<div class="flex items-center gap-2 text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-3 py-1.5 mb-6 w-fit">'+icon('db','w-3.5 h-3.5')+' متصل بقاعدة بيانات Supabase — المصادقة حقيقية</div>'
+  :'<div class="flex items-center gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1.5 mb-6 w-fit">'+icon('bolt','w-3.5 h-3.5')+' وضع تجريبي محلي — <a href="#/setup" class="underline">اربط قاعدة البيانات</a></div>';
  $('#app').innerHTML='<div class="min-h-screen grid lg:grid-cols-2">'
  +'<div class="hidden lg:flex flex-col justify-between p-10 bg-ink-900 border-l border-ink-800 relative overflow-hidden">'
  +'<div class="grid-bg absolute inset-0"></div>'
@@ -429,9 +478,191 @@ function renderAuth(mode){
  +'<div class="flex items-center justify-center p-6"><div class="w-full max-w-md fadeUp">'
  +'<a href="#/" class="flex items-center gap-2 font-display font-extrabold text-lg mb-8 lg:hidden">'+logoSVG()+' عون AI</a>'
  +'<h1 class="font-display font-extrabold text-2xl mb-1">'+titles[mode][0]+'</h1>'
- +'<p class="text-ink-400 text-sm mb-8">'+titles[mode][1]+'</p>'
- +form
+ +'<p class="text-ink-400 text-sm mb-6">'+titles[mode][1]+'</p>'
+ +modeBadge+form
  +'</div></div></div>';
+}
+
+/* ================= Setup (Backend / Supabase) ================= */
+var SQL_SCHEMA=`-- ============================================================
+-- Awn AI — Supabase Database Schema (Phase 1)
+-- Run in: Supabase Dashboard -> SQL Editor -> Run
+-- Multi-tenant: every row is scoped to a workspace owned by auth.uid()
+-- ============================================================
+
+create extension if not exists pgcrypto;
+
+-- 1) Workspaces (tenant root)
+create table if not exists public.workspaces (
+  id         uuid primary key default gen_random_uuid(),
+  owner_id   uuid not null references auth.users(id) on delete cascade,
+  name       text not null default 'My Workspace',
+  type       text default '',
+  lang       text default 'العربية',
+  tz         text default 'Asia/Riyadh',
+  team       jsonb default '[]',
+  plan       text not null default 'free',
+  usage_ai   int  not null default 0,
+  created_at timestamptz default now()
+);
+
+-- 2) Agents
+create table if not exists public.agents (
+  id           text primary key,
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  data         jsonb not null default '{}',
+  created_at   timestamptz default now()
+);
+
+-- 3) Widgets
+create table if not exists public.widgets (
+  id           text primary key,
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  data         jsonb not null default '{}',
+  created_at   timestamptz default now()
+);
+
+-- 4) Knowledge Base documents
+create table if not exists public.knowledge_docs (
+  id           text primary key,
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  data         jsonb not null default '{}',
+  created_at   timestamptz default now()
+);
+
+-- 5) Contacts (CRM)
+create table if not exists public.contacts (
+  id           text primary key,
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  data         jsonb not null default '{}',
+  created_at   timestamptz default now()
+);
+
+-- 6) Conversations (messages are stored inside data.messages)
+create table if not exists public.conversations (
+  id           text primary key,
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  data         jsonb not null default '{}',
+  created_at   timestamptz default now()
+);
+
+-- 7) Invoices
+create table if not exists public.invoices (
+  id           text primary key,
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  data         jsonb not null default '{}',
+  created_at   timestamptz default now()
+);
+
+-- Indexes
+create index if not exists ws_owner_idx     on public.workspaces(owner_id);
+create index if not exists agents_ws_idx    on public.agents(workspace_id);
+create index if not exists widgets_ws_idx   on public.widgets(workspace_id);
+create index if not exists kb_ws_idx        on public.knowledge_docs(workspace_id);
+create index if not exists contacts_ws_idx  on public.contacts(workspace_id);
+create index if not exists convos_ws_idx    on public.conversations(workspace_id);
+create index if not exists invoices_ws_idx  on public.invoices(workspace_id);
+
+-- ============================================================
+-- Row Level Security (Multi-Tenant isolation)
+-- ============================================================
+alter table public.workspaces     enable row level security;
+alter table public.agents         enable row level security;
+alter table public.widgets        enable row level security;
+alter table public.knowledge_docs enable row level security;
+alter table public.contacts       enable row level security;
+alter table public.conversations  enable row level security;
+alter table public.invoices       enable row level security;
+
+drop policy if exists own_ws on public.workspaces;
+create policy own_ws on public.workspaces
+  for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+
+drop policy if exists agents_member on public.agents;
+create policy agents_member on public.agents
+  for all using (workspace_id in (select id from public.workspaces where owner_id = auth.uid()))
+  with check (workspace_id in (select id from public.workspaces where owner_id = auth.uid()));
+
+drop policy if exists widgets_member on public.widgets;
+create policy widgets_member on public.widgets
+  for all using (workspace_id in (select id from public.workspaces where owner_id = auth.uid()))
+  with check (workspace_id in (select id from public.workspaces where owner_id = auth.uid()));
+
+drop policy if exists kb_member on public.knowledge_docs;
+create policy kb_member on public.knowledge_docs
+  for all using (workspace_id in (select id from public.workspaces where owner_id = auth.uid()))
+  with check (workspace_id in (select id from public.workspaces where owner_id = auth.uid()));
+
+drop policy if exists contacts_member on public.contacts;
+create policy contacts_member on public.contacts
+  for all using (workspace_id in (select id from public.workspaces where owner_id = auth.uid()))
+  with check (workspace_id in (select id from public.workspaces where owner_id = auth.uid()));
+
+drop policy if exists convos_member on public.conversations;
+create policy convos_member on public.conversations
+  for all using (workspace_id in (select id from public.workspaces where owner_id = auth.uid()))
+  with check (workspace_id in (select id from public.workspaces where owner_id = auth.uid()));
+
+drop policy if exists invoices_member on public.invoices;
+create policy invoices_member on public.invoices
+  for all using (workspace_id in (select id from public.workspaces where owner_id = auth.uid()))
+  with check (workspace_id in (select id from public.workspaces where owner_id = auth.uid()));
+
+-- Notes:
+-- * The anon key is safe to use in the browser because RLS scopes every query.
+-- * Never expose the service_role key in any frontend code.
+-- * Usage limits (500 / 5000 / 50000 AI messages) must be enforced server-side
+--   in a later phase via a Supabase Edge Function, not in JavaScript.`;
+
+function renderSetup(){
+ var connected=isRemote();
+ var phases=[
+  ['Supabase + تصميم قاعدة البيانات',true],
+  ['ربط Dashboard بقاعدة البيانات',true],
+  ['widget.js + Embed حقيقي',false],
+  ['Backend لاستقبال الرسائل',false],
+  ['n8n + Gemini في الخلفية',false],
+  ['Knowledge Base / RAG حقيقية',false],
+  ['Billing + حدود الخادم',false],
+  ['Security + Production',false]];
+ $('#app').innerHTML='<div class="min-h-screen max-w-4xl mx-auto px-4 py-10">'
+ +'<div class="flex items-center justify-between mb-8 flex-wrap gap-3">'
+ +'<a href="#/" class="flex items-center gap-2 font-display font-extrabold text-lg">'+logoSVG()+' عون AI</a>'
+ +'<div class="flex gap-2">'
+ +(me()?'<button data-action="go" data-to="#/app" class="btn-ghost !py-2 text-sm">لوحة التحكم</button>':'')
+ +'<a href="#/" class="btn-ghost !py-2 text-sm">الرئيسية</a></div></div>'
+ +'<h1 class="font-display font-extrabold text-3xl mb-2">الخلفية وقاعدة البيانات</h1>'
+ +'<p class="text-ink-400 text-sm leading-7 mb-8">المرحلة 1: تخزين حقيقي متعدد المستأجرين على Supabase (PostgreSQL + Auth + RLS). كل عميل لديه Workspace مستقل تمامًا على مستوى قاعدة البيانات.</p>'
+ +'<div class="grid md:grid-cols-[1fr_280px] gap-5 items-start">'
+ +'<div class="space-y-5">'
+ +'<div class="glass rounded-2xl p-6">'
+ +'<div class="flex items-center justify-between mb-4"><h3 class="font-display font-bold flex items-center gap-2">'+icon('db','w-5 h-5 text-tiffany-400')+' اتصال Supabase</h3>'
+ +(connected?'<span class="text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-3 py-1">● متصل</span>':'<span class="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1">● غير متصل</span>')+'</div>'
+ +'<form id="f-setup" class="space-y-3">'
+ +'<label class="lbl2">Supabase Project URL<input name="url" class="inp-s ltr" placeholder="https://xxxx.supabase.co" value="'+esc((cfg&&cfg.url)||'')+'" required></label>'
+ +'<label class="lbl2">Anon Public Key<input name="key" class="inp-s ltr" placeholder="eyJhbGciOi..." value="'+esc((cfg&&cfg.key)||'')+'" required></label>'
+ +'<p class="text-[11px] text-ink-500 leading-6">مفتاح anon آمن للنشر في المتصفح لأن البيانات محمية بسياسات RLS. لا تستخدم مفتاح service_role هنا أبدًا.</p>'
+ +'<div class="flex gap-2 flex-wrap"><button class="btn-primary">حفظ وفحص الاتصال</button>'
+ +(connected?'<button type="button" data-action="sb-disconnect" class="btn-ghost !border-red-500/40 !text-red-300">فصل الاتصال</button>':'')+'</div>'
+ +'</form></div>'
+ +'<div class="glass rounded-2xl p-6">'
+ +'<div class="flex items-center justify-between mb-3 flex-wrap gap-2"><h3 class="font-display font-bold">مخطط قاعدة البيانات (SQL)</h3><button data-action="copy-sql" class="btn-ghost !py-2 text-xs">'+icon('copy','w-3.5 h-3.5')+' نسخ المخطط</button></div>'
+ +'<p class="text-xs text-ink-500 leading-6 mb-3">انسخ والصق في: Supabase Dashboard → SQL Editor → Run. يتضمن الجداول والفهارس وسياسات عزل المستأجرين.</p>'
+ +'<pre class="codebox">'+esc(SQL_SCHEMA)+'</pre>'
+ +'</div>'
+ +'</div>'
+ +'<div class="space-y-5">'
+ +'<div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">مراحل الإطلاق</h3>'
+ +'<div class="space-y-2.5">'+phases.map(function(p,i){return '<div class="flex items-center gap-2.5 text-sm"><span class="w-6 h-6 rounded-full flex items-center justify-center text-[11px] flex-none '+(p[1]?'bg-tiffany-500 text-ink-950 font-bold':'bg-ink-800 text-ink-500')+'">'+(i+1)+'</span><span class="'+(p[1]?'text-ink-100':'text-ink-500')+'">'+p[0]+'</span>'+(p[1]?'<span class="mr-auto text-tiffany-400">'+icon('check','w-4 h-4')+'</span>':'')+'</div>'}).join('')+'</div></div>'
+ +'<div class="glass rounded-2xl p-6 text-xs text-ink-400 leading-6 space-y-2">'
+ +'<p><b class="text-ink-200">لماذا هذا التصميم؟</b></p>'
+ +'<p>• كل كيان مرتبط بـ workspace_id — عزل Multi-Tenant على مستوى قاعدة البيانات.</p>'
+ +'<p>• المصادقة عبر Supabase Auth (بريد + كلمة مرور + جلسات).</p>'
+ +'<p>• حدود الاستخدام ستُفرض من الخادم لاحقًا وليس من JavaScript.</p>'
+ +'</div>'
+ +'</div></div>'
+ +'<div id="sb-status" class="mt-5"></div>'
+ +'</div>';
 }
 
 /* ================= Test page ================= */
@@ -451,12 +682,12 @@ function renderTest(){
  +'<div class="grid sm:grid-cols-3 gap-4 mt-10 text-right">'
  +[['سماعة بلوتوث برو','199 ر.س'],['شاحن سريع 45 واط','89 ر.س'],['حقيبة لابتوب','149 ر.س']].map(function(p){return '<div class="rounded-2xl border border-slate-200 p-5 bg-white shadow-sm"><div class="h-28 rounded-xl bg-slate-100 mb-4"></div><b>'+p[0]+'</b><div class="text-tiffany-600 font-bold mt-1">'+p[1]+'</div></div>'}).join('')
  +'</div></div>'
- +'<div class="max-w-5xl mx-auto px-4 pb-16 text-sm text-slate-500 leading-7">جرّب فتح الويدجت واسأل عن الأسعار أو الشحن أو الاسترجاع — ستصل المحادثة مباشرة إلى لوحة التحكم في قسم «المحادثات» و«العملاء».</div>'
+ +'<div class="max-w-5xl mx-auto px-4 pb-16 text-sm text-slate-500 leading-7">جرّب فتح الويدجت واسأل عن الأسعار أو الشحن أو الاسترجاع — ستصل المحادثة مباشرة إلى لوحة التحكم في قسم «المحادثات» و«العملاء»'+(isRemote()?' وتُحفظ في قاعدة البيانات':'')+'.</div>'
  +'</div><div id="test-widget"></div>';
  if(w.enabled)mountWidget($('#test-widget'),w,agent,{fixed:true,persist:true,credit:true});
 }
 
-/* ================= Dashboard ================= */
+/* ================= Dashboard pages ================= */
 var PAGES={'':'home',conversations:'convos',agents:'agents',widgets:'widgets',builder:'builder',contacts:'contacts',kb:'kb',analytics:'analytics',settings:'settings',billing:'billing'};
 var NAV=[['','الرئيسية','home'],['conversations','المحادثات','chat'],['agents','AI Agents','bot'],['widgets','Widgets','widget'],['contacts','العملاء','users'],['kb','Knowledge Base','book'],['analytics','التحليلات','chart'],['settings','الإعدادات','gear'],['billing','الاشتراك','card']];
 function handoffCount(){var s=ws();return s?s.convos.filter(function(c){return c.status==='handoff'}).length:0}
@@ -472,6 +703,9 @@ function dashShell(page,body,title){
  +'<div class="px-5 py-3 text-[11px] text-ink-500 border-b border-ink-800 truncate flex-none">مساحة العمل: <b class="text-ink-300">'+esc(s.settings.name)+'</b></div>'
  +'<nav class="flex-1 overflow-y-auto p-3 space-y-1">'+navBtns+'</nav>'
  +'<div class="p-3 border-t border-ink-800 space-y-1 flex-none">'
+ +(isRemote()
+   ?'<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/20">'+icon('db','w-4 h-4')+' Supabase متصل</button>'
+   :'<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20">'+icon('db','w-4 h-4')+' وضع محلي — اربط الخلفية</button>')
  +'<button data-action="go" data-to="#/test" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm text-ink-300 hover:bg-ink-850">'+icon('globe','w-[18px] h-[18px]')+' موقع تجريبي</button>'
  +'<button data-action="logout" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm text-red-300 hover:bg-red-500/10">'+icon('out','w-[18px] h-[18px]')+' تسجيل الخروج</button>'
  +'</div></aside>'
@@ -515,7 +749,9 @@ function pgHome(){
  var max=Math.max.apply(null,days.concat([1]));
  var recent=w.convos.slice(0,4).map(function(c){var ct=w.contacts.find(function(x){return x.id===c.contactId});
    return '<button data-action="go" data-to="#/app/conversations?c='+c.id+'" class="w-full text-right flex items-center gap-3 hover:bg-ink-850 rounded-xl p-2 transition"><div class="w-9 h-9 rounded-full bg-ink-800 flex items-center justify-center text-xs font-bold text-tiffany-300 flex-none">'+esc(((ct&&ct.name)||'ز').charAt(0))+'</div><div class="flex-1 min-w-0"><div class="text-sm font-semibold truncate">'+esc((ct&&ct.name)||'زائر')+'</div><div class="text-[11px] text-ink-500 truncate">'+esc((c.messages[c.messages.length-1]||{}).text||'')+'</div></div>'+statusBadge(c.status)+'</button>'}).join('');
- return '<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">'
+ return (isRemote()?'<div class="mb-4 text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2">'+icon('db','w-4 h-4')+' البيانات محفوظة ومتزامنة مع Supabase — Workspace: <span class="ltr">'+esc((w.__wid||'').slice(0,8))+'…</span></div>'
+ :'<div class="mb-4 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2 flex-wrap">'+icon('bolt','w-4 h-4')+' تعمل الآن على تخزين محلي تجريبي. <button data-action="go" data-to="#/setup" class="underline font-bold">اربط قاعدة بيانات Supabase →</button></div>')
+ +'<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">'
  +statCard('chat','المحادثات',w.convos.length,handoffCount()+' بانتظار تحويل بشري')
  +statCard('users','العملاء',w.contacts.length)
  +statCard('send','رسائل اليوم',today)
@@ -749,15 +985,15 @@ function pgBilling(){
  var plans=Object.keys(PLANS).map(function(k){var p=PLANS[k];
   return '<div class="rounded-2xl p-6 border '+(k===w.plan?'border-tiffany-500/60 bg-tiffany-500/5':'border-ink-800 bg-ink-850')+'">'
   +'<h3 class="font-display font-bold">'+p.name+(k===w.plan?' <span class="text-[10px] text-tiffany-300 bg-tiffany-500/10 border border-tiffany-500/30 rounded-full px-2 py-0.5">خطتك الحالية</span>':'')+'</h3>'
-  +'<div class="my-3 font-display font-extrabold text-3xl">'+p.price+'<span class="text-sm text-ink-400 font-normal"> ريال/شهر</span></div>'
-  +'<ul class="text-xs text-ink-400 space-y-2 mb-5">'+p.feat.map(function(f){return '<li class="flex gap-2">'+icon('check','w-3.5 h-3.5 text-tiffany-500 mt-0.5 flex-none')+' '+f+'</li>'}).join('')+'</ul>'
-  +(k===w.plan?'<button class="btn-ghost w-full" disabled>مفعّلة</button>':'<button data-action="choose-plan" data-id="'+k+'" class="'+(k==='growth'?'btn-primary':'btn-ghost')+' w-full">الترقية إلى '+p.name+'</button>')
-  +'</div>'}).join('');
+ +'<div class="my-3 font-display font-extrabold text-3xl">'+p.price+'<span class="text-sm text-ink-400 font-normal"> ريال/شهر</span></div>'
+ +'<ul class="text-xs text-ink-400 space-y-2 mb-5">'+p.feat.map(function(f){return '<li class="flex gap-2">'+icon('check','w-3.5 h-3.5 text-tiffany-500 mt-0.5 flex-none')+' '+f+'</li>'}).join('')+'</ul>'
+ +(k===w.plan?'<button class="btn-ghost w-full" disabled>مفعّلة</button>':'<button data-action="choose-plan" data-id="'+k+'" class="'+(k==='growth'?'btn-primary':'btn-ghost')+' w-full">الترقية إلى '+p.name+'</button>')
+ +'</div>'}).join('');
  var invRows=w.invoices.map(function(i){return '<tr class="border-t border-ink-850"><td class="px-5 py-3 ltr text-xs">'+esc(i.id)+'</td><td class="px-5 py-3">'+esc(i.plan)+'</td><td class="px-5 py-3">'+i.amount+' ريال</td><td class="px-5 py-3 text-ink-400">'+fmtDate(i.date)+'</td><td class="px-5 py-3"><button data-action="inv" class="text-xs text-tiffany-400 hover:underline">تنزيل PDF</button></td></tr>'}).join('');
  return '<div class="glass rounded-2xl p-6 mb-5">'
  +'<div class="flex flex-wrap items-center justify-between gap-3 mb-3"><h3 class="font-display font-bold">استخدام رسائل AI هذا الشهر</h3><span class="text-sm text-ink-400">'+w.usage.ai+' / '+cap+'</span></div>'
  +'<div class="h-3 bg-ink-850 rounded-full overflow-hidden"><div class="h-full bg-gradient-to-l from-tiffany-400 to-tiffany-600 rounded-full transition-all" style="width:'+pct+'%"></div></div>'
- +'<p class="text-[11px] text-ink-500 mt-2">عند بلوغ الحد تتوقف الردود مؤقتًا حتى الترقية أو بداية الشهر.</p></div>'
+ +'<p class="text-[11px] text-ink-500 mt-2">الحدود ستُفرض من الخادم مباشرة في مرحلة Billing — وليس من JavaScript.</p></div>'
  +'<div class="grid md:grid-cols-3 gap-5 mb-6">'+plans+'</div>'
  +'<div class="glass rounded-2xl overflow-hidden"><div class="px-5 py-4 font-display font-bold border-b border-ink-800">الفواتير</div>'
  +'<div class="overflow-x-auto"><table class="w-full text-sm min-w-[560px]"><thead class="text-ink-500 text-xs"><tr><th class="text-right px-5 py-3">الفاتورة</th><th class="text-right px-5 py-3">الخطة</th><th class="text-right px-5 py-3">المبلغ</th><th class="text-right px-5 py-3">التاريخ</th><th class="text-right px-5 py-3"></th></tr></thead>'
@@ -765,8 +1001,7 @@ function pgBilling(){
 }
 
 /* ---- Modals ---- */
-function modal(html){var r=document.getElementById('modal-root');
- r.innerHTML='<div class="fixed inset-0 z-[90] bg-black/70 flex items-center justify-center p-4" data-action="modal-close"><div class="glass rounded-2xl w-full max-w-lg max-h-[88vh] overflow-y-auto p-6 fadeUp shadow-soft" onclick="event.stopPropagation()">'+html+'</div></div>'}
+function modal(html){document.getElementById('modal-root').innerHTML='<div class="fixed inset-0 z-[90] bg-black/70 flex items-center justify-center p-4" data-action="modal-close"><div class="glass rounded-2xl w-full max-w-lg max-h-[88vh] overflow-y-auto p-6 fadeUp shadow-soft" onclick="event.stopPropagation()">'+html+'</div></div>'}
 function closeModal(){document.getElementById('modal-root').innerHTML=''}
 function agentModal(id){
  var a=id?ws().agents.find(function(x){return x.id===id}):null;
@@ -809,8 +1044,8 @@ function embedModal(id){
 
 /* ================= Global events ================= */
 document.addEventListener('click',function(e){
- var sb=e.target.closest('[data-action="sb"]');
- if(sb){var s=document.getElementById('sidebar');if(s){s.classList.toggle('max-lg:-translate-x-full')}
+ var sbBtn=e.target.closest('[data-action="sb"]');
+ if(sbBtn){var s=document.getElementById('sidebar');if(s){s.classList.toggle('max-lg:-translate-x-full')}
   var o=document.getElementById('sb-overlay');if(o)o.classList.toggle('hidden');return}
  var t=e.target.closest('[data-action]');if(!t)return;
  var a=t.dataset.action,id=t.dataset.id;
@@ -818,13 +1053,15 @@ document.addEventListener('click',function(e){
  try{
  if(a==='go')go(t.dataset.to);
  else if(a==='scroll'){e.preventDefault();var el=document.querySelector(t.dataset.to);if(el)el.scrollIntoView({behavior:'smooth'})}
- else if(a==='logout'){db.session=null;save();toast('تم تسجيل الخروج');go('#/')}
+ else if(a==='logout'){
+   if(isRemote()){sbClient().auth.signOut()}else{db.session=null;persist()}
+   db.ws=null;remoteUser=null;selConvo=null;draft=null;toast('تم تسجيل الخروج');go('#/')}
  else if(a==='new-agent'){if(ws().agents.length>=PLANS[ws().plan].agents){toast('بلغت حد الـ Agents في خطتك — قم بالترقية','err');go('#/app/billing');return}agentModal()}
  else if(a==='edit-agent')agentModal(id);
  else if(a==='del-agent'){if(confirm('حذف هذا الـ Agent؟')){ws().agents=ws().agents.filter(function(x){return x.id!==id});save();route()}}
  else if(a==='new-widget'){if(!ws().agents.length){toast('أنشئ Agent أولًا','err');go('#/app/agents');return}widgetModal()}
  else if(a==='open-builder'){draft=null;go('#/app/builder?id='+id)}
- else if(a==='save-widget'){var wS=cur(draft.id);if(wS){Object.assign(wS,draft);save();toast('تم حفظ إعدادات الويدجت','ok')}}
+ else if(a==='save-widget'){var wS=cur(draft.id);if(wS){Object.assign(wS,draft);save();toast('تم حفظ إعدادات الويدجت'+(isRemote()?' ومزامنتها':''),'ok')}}
  else if(a==='embed')embedModal(id);
  else if(a==='copy-embed'){var wC=cur(id);if(wC)copyText('<script src="https://cdn.aown.app/widget.js" data-widget-id="'+wC.id+'" data-token="'+wC.token+'" async><'+'/script>')}
  else if(a==='regen'){var wR=cur(id);if(wR){wR.token=uid('tk_');save();toast('تم توليد رمز جديد — الرمز القديم لم يعد صالحًا','ok');embedModal(id)}}
@@ -845,10 +1082,12 @@ document.addEventListener('click',function(e){
  else if(a==='rm-logo'){if(draft){draft.logo='';route()}}
  else if(a==='tg'){if(draft){var k=t.dataset.b;draft[k]=!draft[k];route()}}
  else if(a==='save-settings'){ws().settings.name=document.getElementById('s-name').value;ws().settings.type=document.getElementById('s-type').value;ws().settings.lang=document.getElementById('s-lang').value;ws().settings.tz=document.getElementById('s-tz').value;save();toast('تم حفظ الإعدادات','ok')}
- else if(a==='reset-ws'){if(confirm('سيتم حذف كل البيانات وإعادة بيانات البداية. متابعة؟')){db.ws=starterKit();save();selConvo=null;draft=null;route()}}
- else if(a==='del-account'){if(confirm('حذف الحساب نهائيًا؟')){db.users=db.users.filter(function(u){return u.id!==db.session});db.session=null;db.ws=null;save();go('#/')}}
+ else if(a==='reset-ws'){if(confirm('سيتم حذف كل البيانات وإعادة بيانات البداية. متابعة؟')){var wid=db.ws&&db.ws.__wid;db.ws=starterKit();if(wid)db.ws.__wid=wid;save();selConvo=null;draft=null;toast('تمت إعادة التعيين','ok');route()}}
+ else if(a==='del-account'){if(isRemote()){toast('حذف الحساب يتم من إعدادات المصادقة في Supabase','err')}else if(confirm('حذف الحساب نهائيًا؟')){db.users=db.users.filter(function(u){return u.id!==db.session});db.session=null;db.ws=null;persist();go('#/')}}
  else if(a==='choose-plan'){ws().plan=id;ws().invoices.unshift({id:uid('inv_'),plan:PLANS[id].name,amount:PLANS[id].price,date:now(),status:'مدفوعة'});save();toast('تم تغيير خطتك إلى '+PLANS[id].name+' 🎉','ok');route()}
  else if(a==='inv')toast('تم تجهيز الفاتورة (نسخة عرض)','ok');
+ else if(a==='copy-sql')copyText(SQL_SCHEMA);
+ else if(a==='sb-disconnect'){cfg=null;sb=null;remoteBroken=false;localStorage.removeItem('aown_cfg');toast('تم فصل الاتصال — العودة للوضع المحلي');route()}
  }catch(err){console.error(err);toast('تعذر تنفيذ العملية','err')}
 });
 document.addEventListener('input',function(e){
@@ -872,28 +1111,76 @@ document.addEventListener('change',function(e){
 });
 document.addEventListener('submit',function(e){
  var f=e.target;if(!f||!f.id)return;
- if(f.id.indexOf('f-')!==0&&f.id!=='f-agent')return;
- var isWidgetForm=f.classList&&f.classList.contains('w-form');
- if(isWidgetForm)return;
+ if(f.classList&&f.classList.contains('w-form'))return;
  e.preventDefault();
  var fd=new FormData(f);
  try{
- if(f.id==='f-login'){var u=db.users.find(function(x){return x.email===fd.get('email')&&x.pw===hashPw(fd.get('pass'))});
+ if(f.id==='f-setup'){
+   var u=String(fd.get('url')).trim().replace(/\/+$/,''),k=String(fd.get('key')).trim();
+   if(!/^https:\/\/[a-z0-9.-]+\.supabase\.co$/i.test(u)){toast('رابط Supabase غير صالح','err');return}
+   cfg={url:u,key:k};sb=null;remoteBroken=false;
+   try{localStorage.setItem('aown_cfg',JSON.stringify(cfg))}catch(err){}
+   var c=sbClient();
+   if(!c){toast('تعذر إنشاء اتصال Supabase','err');return}
+   toast('جارٍ فحص الاتصال...');
+   c.from('workspaces').select('id',{count:'exact',head:true}).then(function(res){
+     var st=document.getElementById('sb-status');
+     if(res.error){
+       var msg=res.error.message||'';
+       if(/policy|permission|42501/i.test(msg)){toast('متصل ✔ لكن سياسات RLS غير مفعلة — شغّل مخطط SQL كاملًا','err')}
+       else if(/does not exist|PGRST|relation/i.test(msg)){toast('متصل ✔ لكن الجداول غير موجودة — شغّل مخطط SQL أولًا','err')}
+       else{toast('فشل الاتصال: '+msg,'err')}
+       if(st)st.innerHTML='<div class="glass rounded-2xl p-5 text-sm text-red-300 border-red-500/30">⚠️ '+esc(msg)+'<div class="text-xs text-ink-400 mt-2">تأكد من تشغيل مخطط SQL في SQL Editor ثم أعد الفحص بالحفظ مرة أخرى.</div></div>';
+     }else{
+       toast('الاتصال ناجح وقاعدة البيانات جاهزة ✔','ok');
+       if(st)st.innerHTML='<div class="glass rounded-2xl p-5 text-sm text-emerald-300 border-emerald-500/30">✅ Supabase جاهز. سجّل حسابًا جديدًا وسيُنشأ لك Workspace مستقل في قاعدة البيانات.</div>';
+       route();
+     }});
+   return}
+ if(f.id==='f-login'){
+   var em=String(fd.get('email')).trim(),pw=fd.get('pass');
+   if(isRemote()){
+     var b=document.getElementById('b-login');if(b){b.disabled=true;b.textContent='جارٍ الدخول...'}
+     sbClient().auth.signInWithPassword({email:em,password:pw}).then(async function(res){
+       if(res.error){toast(res.error.message==='Invalid login credentials'?'بيانات الدخول غير صحيحة':res.error.message,'err');if(b){b.disabled=false;b.textContent='تسجيل الدخول'}return}
+       remoteUser=res.data.user;
+       toast('جارٍ تحميل مساحة العمل...');
+       var ok=await loadRemote();
+       if(ok){toast('مرحبًا بعودتك 👋','ok');go('#/app')}
+     });
+     return}
+   var u=db.users.find(function(x){return x.email===em&&x.pw===hashPw(pw)});
    if(!u){toast('بيانات الدخول غير صحيحة','err');return}
-   db.session=u.id;save();toast('مرحبًا بعودتك 👋','ok');go('#/app')}
- else if(f.id==='f-signup'){var em=String(fd.get('email')).trim();
-   if(db.users.some(function(x){return x.email===em})){toast('البريد مسجل مسبقًا','err');return}
-   var nu={id:uid('u_'),name:String(fd.get('name')).trim(),email:em,pw:hashPw(fd.get('pass')),createdAt:now()};
-   db.users.push(nu);db.session=nu.id;db.ws=starterKit();db.ws.settings.name=String(fd.get('company')).trim();db.ws.settings.type=fd.get('type');save();
+   db.session=u.id;persist();toast('مرحبًا بعودتك 👋','ok');go('#/app')}
+ else if(f.id==='f-signup'){
+   var em2=String(fd.get('email')).trim(),pw2=fd.get('pass');
+   if(isRemote()){
+     var b2=document.getElementById('b-signup');if(b2){b2.disabled=true;b2.textContent='جارٍ إنشاء الحساب...'}
+     sbClient().auth.signUp({email:em2,password:pw2,options:{data:{name:fd.get('name'),company:fd.get('company')}}}).then(async function(res){
+       if(res.error){toast(res.error.message,'err');if(b2){b2.disabled=false;b2.textContent='إنشاء الحساب والبدء'}return}
+       if(!res.data.session){toast('تم إرسال رابط تفعيل إلى بريدك — فعّل الحساب ثم سجّل الدخول','ok');if(b2){b2.disabled=false;b2.textContent='إنشاء الحساب والبدء'}go('#/login');return}
+       remoteUser=res.data.user;
+       toast('جارٍ إنشاء مساحة العمل في قاعدة البيانات...');
+       var ok=await loadRemote();
+       if(ok){var s=ws();s.settings.name=String(fd.get('company')).trim()||s.settings.name;s.settings.type=fd.get('type');save();toast('تم إنشاء حسابك ومساحة عملك 🎉','ok');go('#/app')}
+     });
+     return}
+   if(db.users.some(function(x){return x.email===em2})){toast('البريد مسجل مسبقًا','err');return}
+   var nu={id:uid('u_'),name:String(fd.get('name')).trim(),email:em2,pw:hashPw(pw2),createdAt:now()};
+   db.users.push(nu);db.session=nu.id;db.ws=starterKit();db.ws.settings.name=String(fd.get('company')).trim();db.ws.settings.type=fd.get('type');persist();
    toast('تم إنشاء مساحة عملك 🎉','ok');go('#/app')}
- else if(f.id==='f-forgot'){var fu=db.users.find(function(x){return x.email===String(fd.get('email')).trim()});
+ else if(f.id==='f-forgot'){
+   var em3=String(fd.get('email')).trim();
+   if(isRemote()){sbClient().auth.resetPasswordForEmail(em3,{redirectTo:location.origin+'#/login'}).then(function(res){
+     if(res.error){toast(res.error.message,'err')}else toast('إن وجد الحساب، وصلك رابط الاستعادة على بريدك','ok')});return}
+   var fu=db.users.find(function(x){return x.email===em3});
    if(!fu){toast('البريد غير موجود','err');return}
    modal('<h3 class="font-display font-bold mb-2">إعادة التعيين</h3><p class="text-xs text-ink-400 mb-4">تم إرسال رابط الاستعادة إلى بريدك. (وضع العرض: عيّن كلمة مرور جديدة مباشرة)</p><form id="f-reset"><input type="hidden" name="uid" value="'+fu.id+'"><label class="lbl2">كلمة المرور الجديدة<input name="pass" minlength="6" required type="password" class="inp-s"></label><button class="btn-primary w-full mt-3">تعيين كلمة المرور</button></form>')}
- else if(f.id==='f-reset'){var ru=db.users.find(function(x){return x.id===fd.get('uid')});if(ru){ru.pw=hashPw(fd.get('pass'));save()}closeModal();toast('تم تحديث كلمة المرور','ok');go('#/login')}
+ else if(f.id==='f-reset'){var ru=db.users.find(function(x){return x.id===fd.get('uid')});if(ru){ru.pw=hashPw(fd.get('pass'));persist()}closeModal();toast('تم تحديث كلمة المرور','ok');go('#/login')}
  else if(f.id==='f-agent'){var idv=fd.get('id');var data=Object.fromEntries(fd);
    if(idv){var ea=ws().agents.find(function(x){return x.id===idv});if(ea)Object.assign(ea,data)}
    else ws().agents.push(Object.assign({},data,{id:uid('ag_'),createdAt:now()}));
-   save();closeModal();toast('تم حفظ الـ Agent','ok');route()}
+   save();closeModal();toast('تم حفظ الـ Agent'+(isRemote()?' ومزامنته':''),'ok');route()}
  else if(f.id==='f-widget'){var nw=defWidget(fd.get('agentId'),String(fd.get('name')).trim());ws().widgets.push(nw);save();closeModal();draft=null;go('#/app/builder?id='+nw.id)}
  else if(f.id==='f-dash-msg'){var cd=ws().convos.find(function(x){return x.id===selConvo});if(!cd)return;
    var txt=String(fd.get('m')||'').trim();if(!txt)return;
@@ -905,8 +1192,24 @@ document.addEventListener('submit',function(e){
 });
 
 /* ================= Boot ================= */
-loadDB();
-route();
+async function boot(){
+ loadDB();
+ const c=sbClient();
+ if(c){
+   try{
+     const {data}=await c.auth.getSession();
+     remoteUser=(data&&data.session)?data.session.user:null;
+     c.auth.onAuthStateChange(function(evt,session){
+       var nu=session?session.user:null;
+       if(nu&&nu.id!==(remoteUser&&remoteUser.id)){remoteUser=nu;loadRemote().then(route)}
+       else if(!nu&&remoteUser){remoteUser=null;db.ws=null;route()}
+     });
+     if(remoteUser){await loadRemote()}
+   }catch(e){console.error(e)}
+ }
+ route();
+}
+boot();
 </script>
 </body>
 </html>
