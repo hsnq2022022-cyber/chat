@@ -70,7 +70,6 @@ tailwind.config = {
 <div id="modal-root"></div>
 
 <!-- ================== Phase 2 Delivery Sources ================== -->
-<!-- ملاحظة مهمة: يمنع وضع أي تسلسل إغلاق سكربت داخل هذه الكتل حتى لا ينكسر التحليل -->
 <script type="text/plain" id="src-secrets">
 # ١) ثبّت مفاتيح الأسرار على مستوى الخادم فقط (لا تظهر في الفرونت أبدًا)
 supabase secrets set GEMINI_API_KEY=YOUR_GEMINI_API_KEY
@@ -95,7 +94,6 @@ supabase functions deploy kb-crawl     --no-verify-jwt
 
 create extension if not exists vector;
 
--- 1) Knowledge chunks with real embeddings (Gemini text-embedding-004 = 768 dims)
 create table if not exists public.knowledge_chunks (
   id           uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references public.workspaces(id) on delete cascade,
@@ -115,7 +113,6 @@ create policy chunks_member on public.knowledge_chunks
   for all using (workspace_id in (select id from public.workspaces where owner_id = auth.uid()))
   with check (workspace_id in (select id from public.workspaces where owner_id = auth.uid()));
 
--- 2) Semantic search (cosine similarity)
 create or replace function public.match_kb_chunks(ws uuid, q vector, match_count int default 4)
 returns table (doc_id text, content text, similarity float)
 language sql stable as $$
@@ -126,13 +123,11 @@ language sql stable as $$
   limit match_count;
 $$;
 
--- 3) Usage increment (called by the ai-respond Edge Function with service role)
 create or replace function public.increment_ai_usage(wsid uuid)
 returns void language sql security definer as $$
   update public.workspaces set usage_ai = usage_ai + 1 where id = wsid;
 $$;
 
--- 4) Server-side enforcement of Agents-per-plan (لا يمكن تجاوزها من الفرونت)
 create or replace function public.enforce_agent_limit()
 returns trigger language plpgsql security definer as $$
 declare
@@ -154,12 +149,10 @@ create trigger trg_agent_limit
   before insert on public.agents
   for each row execute function public.enforce_agent_limit();
 
--- 5) Private storage bucket for KB file uploads
 insert into storage.buckets (id, name, public)
 values ('kb-files', 'kb-files', false)
 on conflict (id) do nothing;
 
--- ملفات مرفوعة داخل مجلد {workspaceId}/... فقط لمالك مساحة العمل
 drop policy if exists kb_files_member on storage.objects;
 create policy kb_files_member on storage.objects
   for all
@@ -181,8 +174,6 @@ create policy kb_files_member on storage.objects
 
 <script type="text/plain" id="src-ai">
 // supabase/functions/ai-respond/index.ts
-// يستقبل رسالة الزائر، يتحقق من الويدجت والتوكن، يفرض حد الخطة،
-// يسترجع أقرب المقاطع عبر pgvector، يستدعي Gemini، ويسجل الرد.
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 
@@ -211,14 +202,12 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
-    // 1) Widget + token + enabled
     const { data: widgetRow } = await admin.from("widgets").select("*").eq("id", widget_id).maybeSingle();
     const wd: any = widgetRow?.data ?? {};
     if (!widgetRow || wd.token !== token) return json({ error: "invalid_widget", message: "الويدجت غير صالح." }, 403);
     if (wd.enabled === false) return json({ error: "disabled", message: "هذا الويدجت معطل حاليًا." }, 403);
     const wsId = widgetRow.workspace_id;
 
-    // 2) Workspace + plan limit (فرض من الخادم قبل أي استدعاء)
     const { data: wsRow } = await admin.from("workspaces").select("*").eq("id", wsId).maybeSingle();
     if (!wsRow) return json({ error: "no_workspace", message: "مساحة العمل غير موجودة." }, 404);
     const plan = wsRow.plan || "free";
@@ -226,11 +215,9 @@ Deno.serve(async (req) => {
       return json({ error: "limit", message: "تم تجاوز الحد الشهري لرسائل الذكاء الاصطناعي. الرجاء ترقية الخطة." }, 429);
     }
 
-    // 3) Agent config
     const { data: agentRow } = await admin.from("agents").select("*").eq("id", wd.agentId).maybeSingle();
     const ad: any = agentRow?.data ?? {};
 
-    // 4) Human handoff (سريع وبدون استدعاء نموذج)
     const norm = (s: string) => s.replace(/[\u064B-\u0652\u0640]/g, "").replace(/[أإآ]/g, "ا").toLowerCase();
     const t = norm(text);
     if (HANDOFF.some((k) => t.includes(norm(k)))) {
@@ -247,7 +234,6 @@ Deno.serve(async (req) => {
       return json({ reply: "أكيد، حولتك للموظف المختص الآن ✋ سيتابع معك خلال دقائق.", handoff: true, conversation_id });
     }
 
-    // 5) RAG: embed query + semantic search
     const apiKey = Deno.env.get("GEMINI_API_KEY");
     if (!apiKey) return json({ error: "server", message: "عذرًا، حصل خطأ مؤقت. حاول مرة ثانية." }, 500);
     const genAI = new GoogleGenerativeAI(apiKey);
@@ -259,7 +245,6 @@ Deno.serve(async (req) => {
       .map((h: any) => h.content)
       .join("\n---\n");
 
-    // 6) Conversation history (آخر 10 رسائل)
     let history: { role: "user" | "model"; parts: { text: string }[] }[] = [];
     if (conversation_id) {
       const { data: conv2 } = await admin.from("conversations").select("*").eq("id", conversation_id).maybeSingle();
@@ -269,7 +254,6 @@ Deno.serve(async (req) => {
         .map((m) => ({ role: m.from === "visitor" ? "user" : "model", parts: [{ text: String(m.text) }] }));
     }
 
-    // 7) Gemini call
     const sys = [
       ad.instructions || "أنت مساعد خدمة عملاء.",
       "قواعد صارمة: أجب باختصار وبلغة العميل. لا تخترع أسعارًا أو منتجات أو مواعيد غير موجودة في السياق.",
@@ -277,15 +261,11 @@ Deno.serve(async (req) => {
       context ? "اعتمد فقط على المعلومات التالية من قاعدة المعرفة:\n" + context : "لا تتوفر معلومات ذات صلة في قاعدة المعرفة حاليًا.",
     ].join("\n\n");
 
-    const model = genAI.getGenerativeModel({
-      model: ad.model || "gemini-2.0-flash",
-      systemInstruction: sys,
-    });
+    const model = genAI.getGenerativeModel({ model: ad.model || "gemini-2.0-flash", systemInstruction: sys });
     const chat = model.startChat({ history });
     const res = await chat.sendMessage(text);
     const reply = res.response.text().trim() || (ad.fallback || "عذرًا، ما قدرت أعالج طلبك حاليًا.");
 
-    // 8) تسجيل الرد + المحادثة + عداد الاستخدام
     if (conversation_id) {
       const { data: conv3 } = await admin.from("conversations").select("*").eq("id", conversation_id).maybeSingle();
       if (conv3) {
@@ -308,8 +288,7 @@ Deno.serve(async (req) => {
 
 <script type="text/plain" id="src-verify">
 // supabase/functions/verify-widget/index.ts
-// يتحقق من widget_id + token ويعيد الإعدادات العامة الآمنة فقط
-// (بدون التعليمات أو أي أسرار) ليبنيها widget.js على موقع العميل.
+// التوكن مخزّن داخل عمود data (jsonb) بصيغة data->>'token'
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const CORS = {
@@ -324,23 +303,33 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   try {
     const { widget_id, token } = await req.json().catch(() => ({}));
-    if (!widget_id || !token) return json({ error: "bad_request" }, 400);
+    if (!widget_id || !token) return json({ error: "bad_request", message: "طلب غير صالح." }, 400);
 
     const admin = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
-    const { data: widgetRow } = await admin.from("widgets").select("*").eq("id", widget_id).maybeSingle();
-    const wd: any = widgetRow?.data ?? {};
-    if (!widgetRow || wd.token !== token) return json({ error: "invalid_widget" }, 403);
-    if (wd.enabled === false) return json({ error: "disabled" }, 403);
+    const { data: widgetRow, error: widgetErr } = await admin
+      .from("widgets")
+      .select("id, workspace_id, data")
+      .eq("id", String(widget_id))
+      .maybeSingle();
 
-    const { data: agentRow } = await admin.from("agents").select("data").eq("id", wd.agentId).maybeSingle();
+    if (widgetErr) return json({ error: "server", message: "عذرًا، حصل خطأ مؤقت. حاول مرة ثانية." }, 500);
+    if (!widgetRow) return json({ error: "invalid_widget", message: "الويدجت غير صالح." }, 403);
+
+    const wd: any = widgetRow.data ?? {};
+    const storedToken: string | undefined = typeof wd.token === "string" ? wd.token : undefined;
+    if (!storedToken || storedToken !== String(token)) {
+      return json({ error: "invalid_widget", message: "التوكن غير صحيح." }, 403);
+    }
+    if (wd.enabled === false) return json({ error: "disabled", message: "هذا الويدجت معطل حاليًا." }, 403);
+
+    const { data: agentRow } = await admin.from("agents").select("data").eq("id", String(wd.agentId ?? "")).maybeSingle();
     const ad: any = agentRow?.data ?? {};
     const { data: wsRow } = await admin.from("workspaces").select("plan").eq("id", widgetRow.workspace_id).maybeSingle();
 
-    // إعادة الإعدادات المظهرية والسلوكية فقط — لا تعليمات ولا أسرار
     return json({
       ok: true,
       widget_id,
@@ -352,16 +341,16 @@ Deno.serve(async (req) => {
         placeholder: wd.placeholder || "اكتب رسالتك...",
         primary: wd.primary || "#0ABAB5",
         secondary: wd.secondary || "#0b514f",
-        radius: wd.radius ?? 16,
-        width: wd.width ?? 360,
-        height: wd.height ?? 520,
+        radius: typeof wd.radius === "number" ? wd.radius : 16,
+        width: typeof wd.width === "number" ? wd.width : 360,
+        height: typeof wd.height === "number" ? wd.height : 520,
         position: wd.position || "bottom-left",
         avatar: wd.avatar || ad.avatar || "",
         logo: wd.logo || "",
         online: wd.online !== false,
         typing: wd.typing !== false,
         autoOpen: !!wd.autoOpen,
-        delay: wd.delay ?? 3,
+        delay: typeof wd.delay === "number" ? wd.delay : 3,
         badge: wd.badge !== false,
         sound: !!wd.sound,
         mobile: wd.mobile === "full" ? "full" : "panel",
@@ -369,16 +358,14 @@ Deno.serve(async (req) => {
       },
     });
   } catch (err) {
-    console.error(err);
-    return json({ error: "server" }, 500);
+    console.error("verify-widget: unexpected error", err);
+    return json({ error: "server", message: "عذرًا، حصل خطأ مؤقت. حاول مرة ثانية." }, 500);
   }
 });
 </script>
 
 <script type="text/plain" id="src-kbproc">
 // supabase/functions/kb-process/index.ts
-// يستلم ملفًا مرفوعًا في Storage، يستخرج النص حسب النوع،
-// يقسمه لمقاطع، يولّد Embeddings حقيقية ويخزنها في pgvector.
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 import { extractText, getDocumentProxy } from "npm:unpdf";
@@ -409,15 +396,11 @@ async function extractByType(name: string, buf: Uint8Array): Promise<string> {
     const r = await mammoth.extractRawText({ buffer: buf.slice().buffer });
     return r.value;
   }
-  if (ext === "csv" || ext === "txt") {
-    return new TextDecoder("utf-8").decode(buf);
-  }
+  if (ext === "csv" || ext === "txt") return new TextDecoder("utf-8").decode(buf);
   if (ext === "xlsx" || ext === "xls") {
     const wb = XLSX.read(buf.slice().buffer, { type: "array" });
     let out = "";
-    for (const sn of wb.SheetNames) {
-      out += "\n[" + sn + "]\n" + XLSX.utils.sheet_to_csv(wb.Sheets[sn]);
-    }
+    for (const sn of wb.SheetNames) out += "\n[" + sn + "]\n" + XLSX.utils.sheet_to_csv(wb.Sheets[sn]);
     return out;
   }
   throw new Error("نوع الملف غير مدعوم: " + ext);
@@ -444,20 +427,16 @@ Deno.serve(async (req) => {
     const genAI = new GoogleGenerativeAI(Deno.env.get("GEMINI_API_KEY")!);
     const embModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
 
-    // حذف مقاطع قديمة لنفس المستند ثم إدراج الجديدة
     await admin.from("knowledge_chunks").delete().eq("doc_id", doc_id);
     const rows: any[] = [];
     for (let i = 0; i < chunks.length; i += 20) {
       const batch = chunks.slice(i, i + 20);
       const res = await embModel.batchEmbedContents(batch.map((c) => ({ content: c })));
-      res.embeddings.forEach((e, j) => {
-        rows.push({ workspace_id: workspaceId, doc_id, content: batch[j], embedding: e.values });
-      });
+      res.embeddings.forEach((e, j) => rows.push({ workspace_id: workspaceId, doc_id, content: batch[j], embedding: e.values }));
     }
     const { error: insErr } = await admin.from("knowledge_chunks").insert(rows);
     if (insErr) return json({ error: "insert", message: "فشل تخزين المقاطع: " + insErr.message }, 500);
 
-    // تحديث حالة المستند في لوحة التحكم
     const { data: docRow } = await admin.from("knowledge_docs").select("*").eq("id", doc_id).maybeSingle();
     if (docRow) {
       const dd: any = docRow.data || {};
@@ -477,8 +456,6 @@ Deno.serve(async (req) => {
 
 <script type="text/plain" id="src-crawl">
 // supabase/functions/kb-crawl/index.ts
-// يجلب الصفحة، يستخرج النص الأساسي بدون HTML/Scripts،
-// يقسمه لمقاطع ويخزنه بنفس آلية قاعدة المعرفة (Embeddings + pgvector).
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 import { parse } from "npm:node-html-parser";
@@ -509,8 +486,7 @@ Deno.serve(async (req) => {
 
     const root = parse(html);
     root.querySelectorAll("script,style,noscript,svg,iframe,header,footer,nav").forEach((n) => n.remove());
-    const text = (root.querySelector("main")?.text || root.querySelector("body")?.text || root.text || "")
-      .replace(/\s+/g, " ").trim();
+    const text = (root.querySelector("main")?.text || root.querySelector("body")?.text || root.text || "").replace(/\s+/g, " ").trim();
     if (text.length < 30) return json({ error: "empty", message: "الصفحة لا تحتوي نصًا كافيًا." }, 422);
 
     const chunks = chunkText(text).slice(0, 300);
@@ -554,9 +530,6 @@ Deno.serve(async (req) => {
      data-token="TOKEN"
      data-api="https://YOUR-PROJECT.supabase.co/functions/v1"
    ثم أغلق الوسم بشكل صحيح.
-   - يقرأ الإعدادات الأحدث من الخادم عند كل تحميل صفحة (بدون كاش).
-   - يتحقق من التوكن قبل قبول أي رسالة.
-   - معزول بالكامل عبر Shadow DOM.
 ============================================================ */
 (function () {
   var sc = document.currentScript || (function () {
@@ -642,7 +615,6 @@ Deno.serve(async (req) => {
       wrap.classList.add(s.mobile === 'full' ? 'aw-full' : 'aw-panel-mode');
       wrap.style[s.position === 'bottom-right' ? 'right' : 'left'] = '16px';
 
-      // Panel
       var panel = h('div', 'aw-panel hidden');
       panel.style.width = Math.min(s.width || 360, 420) + 'px';
       panel.style.height = Math.min(s.height || 520, 640) + 'px';
@@ -671,7 +643,6 @@ Deno.serve(async (req) => {
       foot.appendChild(form);
       panel.appendChild(foot);
 
-      // Launcher
       var launch = h('button', 'aw-launch');
       launch.type = 'button';
       launch.style.background = s.primary;
@@ -742,7 +713,7 @@ Deno.serve(async (req) => {
 
       if (s.autoOpen) setTimeout(function () { if (!open) openPanel(); }, Math.max(1, s.delay || 3) * 1000);
     })
-    .catch(function () { /* فشل التحقق: لا تعرض شيئًا */ });
+    .catch(function () {});
 })();
 </script>
 
@@ -778,6 +749,7 @@ function copyText(t){const done=()=>toast('تم النسخ إلى الحافظة
  function fbCopy(x,cb){const ta=document.createElement('textarea');ta.value=x;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy')}catch(e){}ta.remove();cb()}}
 function beep(){try{const c=new (window.AudioContext||window.webkitAudioContext)();const o=c.createOscillator(),g=c.createGain();o.frequency.value=880;g.gain.value=.04;o.connect(g);g.connect(c.destination);o.start();o.stop(c.currentTime+.12)}catch(e){}}
 const apiBase=()=>(cfg&&cfg.url)?cfg.url.replace(/\/+$/,'')+'/functions/v1':null;
+function busy(btn,label){if(!btn)return null;var old=btn.innerHTML;btn.disabled=true;btn.innerHTML=label;return function(){btn.disabled=false;btn.innerHTML=old}}
 
 /* ================= Icons ================= */
 const IC={
@@ -875,7 +847,7 @@ function starterKit(){
   plan:'free',usage:{ai:0},invoices:[{id:uid('inv_'),plan:'البداية',amount:0,date:now()-13*DAY,status:'مدفوعة'}]};
 }
 
-/* ================= Remote sync ================= */
+/* ================= Remote sync (bulk mirror) ================= */
 let pushTimer=null;
 function save(){
  persist();
@@ -917,6 +889,29 @@ async function provisionRemote(c){
  return wsRow;
 }
 
+/* ============ الحفظ الفوري المباشر في Supabase (widgets / agents) ============
+   كل إنشاء/تعديل/تعطيل/إعادة توليد توكن يُكتب فورًا عبر UPSERT في جدول
+   widgets.data (jsonb) — أي أن verify-widget سيجد السجل والتوكن مباشرة. */
+async function sbUpsert(table,row){
+ const c=sbClient();
+ if(!c||!db.ws||!db.ws.__wid)throw new Error('الاتصال بقاعدة البيانات غير متوفر');
+ const clean=Object.assign({},row);delete clean.__unsynced;
+ const {error}=await c.from(table).upsert({id:clean.id,workspace_id:db.ws.__wid,data:clean},{onConflict:'id'});
+ if(error)throw new Error(error.message||'فشل الحفظ في قاعدة البيانات');
+}
+async function sbDeleteRow(table,id){
+ const c=sbClient();
+ if(!c||!db.ws||!db.ws.__wid)throw new Error('الاتصال بقاعدة البيانات غير متوفر');
+ const {error}=await c.from(table).delete().eq('id',id);
+ if(error)throw new Error(error.message||'فشل الحذف من قاعدة البيانات');
+}
+async function syncWidgetToServer(w){
+ const ag=ws().agents.find(a=>a.id===w.agentId);
+ if(ag)await sbUpsert('agents',ag); /* حتى ينجح ربط verify-widget بالـ Agent */
+ await sbUpsert('widgets',w);
+ if(w.__unsynced)delete w.__unsynced;
+}
+
 /* ================= AI Engine ================= */
 const DEMO_TEXTS=['سماعة بلوتوث برو بسعر 199 ريال.\nشاحن سريع 45 واط بسعر 89 ريال.\nعرض الباندل: سماعة + شاحن بسعر 259 ريال.','التوصيل داخل الرياض خلال 24 ساعة برسوم 15 ريال.\nالشحن مجاني للطلبات فوق 200 ريال.','يمكن استرجاع المنتج خلال 14 يومًا بحالته الأصلية.','الدوام من السبت إلى الخميس، 9 صباحًا حتى 6 مساءً.'];
 function demoDocs(){return DEMO_TEXTS.map(t=>({chunks:t.split('\n').map(s=>({text:s,toks:tokens(s)}))}))}
@@ -925,7 +920,6 @@ function searchKB(q){const qt=tokens(q);if(!qt.length)return[];const hits=[];
  src.forEach(d=>(d.chunks||[]).forEach(ch=>{let sc=0;qt.forEach(t=>ch.toks.forEach(ct=>{if(ct.includes(t)||t.includes(ct))sc++}));if(sc>0)hits.push({sc,text:ch.text})}));
  return hits.sort((a,b)=>b.sc-a.sc).slice(0,2)}
 const HANDOFF=['موظف','انسان','بشري','شخص حقيقي','مختص','مسؤول'];
-/* محاكاة محلية — تُستخدم فقط كاحتياط عند تعذر الخادم أو في الوضع التجريبي */
 function aiRespondLocal(text,agent){
  const t=norm(text);
  if(HANDOFF.some(k=>t.includes(norm(k))))return {text:'أكيد، حولتك للموظف المختص الآن ✋ سيتابع معك خلال دقائق.',handoff:true};
@@ -936,7 +930,6 @@ function aiRespondLocal(text,agent){
  if(/(سعر|كم يكلف|بسعر|تكلفه|تكلفة)/.test(t))return {text:'ما عندي سعر مؤكد لهذا حاليًا 🙏 اسألني عن منتجاتنا أو سياساتنا، أو اطلب تحويلك لموظف.'};
  return {text:agent&&agent.fallback?agent.fallback:'عذرًا، ما قدرت أعالج طلبك حاليًا. حاول مرة ثانية بعد قليل.'};
 }
-/* المحرك الحقيقي: يستدعي Edge Function (Gemini + RAG + فرض الحدود من الخادم) */
 async function getAIReply(text,agent,widget,convo){
  if(isRemote()&&cfg&&apiBase()&&widget){
   try{
@@ -1198,7 +1191,7 @@ function renderAuth(mode){
  +'</div></div></div>';
 }
 
-/* ================= Setup + Engine (Phase 2 delivery) ================= */
+/* ================= Setup + Engine ================= */
 var SQL_SCHEMA=`-- ============================================================
 -- Awn AI — Supabase Database Schema (Phase 1)
 -- Run in: Supabase Dashboard -> SQL Editor -> Run
@@ -1299,25 +1292,24 @@ var ENG_TABS=[['secrets','١. المفاتيح والنشر'],['sql2','٢. تر�
 var ENG_SRC={secrets:'src-secrets',sql2:'src-sql2',ai:'src-ai',verify:'src-verify',kbproc:'src-kbproc',crawl:'src-crawl',widgetjs:'src-widgetjs'};
 function engSource(k){var el=document.getElementById(ENG_SRC[k]);return el?el.textContent.trim():''}
 var ENG_STEPS='<ol class="list-decimal pr-5 space-y-3 text-sm text-ink-300 leading-7">'
- +'<li>شغّل ترحيل قاعدة البيانات (تبويب ٢) في SQL Editor — يضيف <b>knowledge_chunks + pgvector</b> وسياسة حد الـ Agents من الخادم وحاوية التخزين <span class="ltr">kb-files</span>.</li>'
+ +'<li>شغّل ترحيل قاعدة البيانات (تبويب ٢) في SQL Editor.</li>'
  +'<li>أنشئ مجلدات الدوال الأربع وانسخ كل ملف من التبويبات إلى <span class="ltr">supabase/functions/&lt;name&gt;/index.ts</span>.</li>'
  +'<li>ثبّت السر: <span class="ltr">supabase secrets set GEMINI_API_KEY=...</span> ثم انشر الدوال كما في تبويب ١.</li>'
- +'<li>ارفع ملف <span class="ltr">widget.js</span> على أي CDN (Supabase Storage عام، أو Cloudflare/JSDELIVR لموقعك).</li>'
- +'<li>حدّث كود التضمين لدى العميل: استبدل مصدر السكربت برابط widget.js الفعلي وأضف <span class="ltr">data-api</span> إلى <span class="ltr">functions/v1</span> في مشروعك.</li>'
- +'<li>اختبر: افتح «موقع تجريبي» من لوحة التحكم وأرسل رسالة — يجب أن يأتي الرد من Gemini عبر الخادم ويُحفظ في <span class="ltr">conversations</span> ويُخصم من <span class="ltr">usage_ai</span>.</li>'
- +'<li>اختبر تجاوز الحد: اجعل <span class="ltr">usage_ai</span> يبلغ حد الخطة وأرسل رسالة — يجب أن يُرفض الطلب برسالة الترقية.</li>'
- +'<li>ارفع ملف PDF/DOCX/CSV من «قاعدة المعرفة» — تأكد أن الحالة تتحول إلى «تمت المعالجة» وأن المقاطع تدخل <span class="ltr">knowledge_chunks</span>.</li>'
- +'<li>أضف رابط موقع من «قاعدة المعرفة» — يتم زحفه واستخراج نصه وتخزينه دلاليًا.</li></ol>';
+ +'<li>ارفع ملف <span class="ltr">widget.js</span> على أي CDN.</li>'
+ +'<li>حدّث كود التضمين لدى العميل: استبدل مصدر السكربت برابط widget.js الفعلي وأضف <span class="ltr">data-api</span>.</li>'
+ +'<li>أنشئ ويدجت من لوحة التحكم — الآن يُكتب مباشرة في جدول <span class="ltr">widgets</span> (id + data.token + data.agentId) وسيجدُه verify-widget فورًا.</li>'
+ +'<li>اختبر «موقع تجريبي» وأرسل رسالة — الرد يأتي من الخادم ويُحفظ في <span class="ltr">conversations</span>.</li>'
+ +'<li>ارفع ملف PDF/DOCX/CSV وأضف روابط — تُعالج وتخزن دلاليًا في <span class="ltr">knowledge_chunks</span>.</li></ol>';
 
 function renderSetup(){
  var connected=isRemote();
  var phases=[
   ['Supabase + تصميم قاعدة البيانات',true],
   ['ربط Dashboard بقاعدة البيانات',true],
+  ['حفظ الودجات/الوكلاء مباشرة في Supabase (UPSERT فوري)',true],
   ['widget.js + Embed حقيقي (كود جاهز للنشر)',true],
   ['Backend لاستقبال الرسائل — ai-respond (كود جاهز للنشر)',true],
   ['Gemini + RAG عبر pgvector (كود جاهز للنشر)',true],
-  ['Knowledge Base: PDF/DOCX/CSV/زحف (كود جاهز للنشر)',true],
   ['Billing + دفع حقيقي + حدود الخادم',false],
   ['تحسينات الجودة + Production',false]];
  $('#app').innerHTML='<div class="min-h-screen max-w-4xl mx-auto px-4 py-10">'
@@ -1327,7 +1319,7 @@ function renderSetup(){
  +(me()?'<button data-action="go" data-to="#/app" class="btn-ghost !py-2 text-sm">لوحة التحكم</button>':'')
  +'<a href="#/" class="btn-ghost !py-2 text-sm">الرئيسية</a></div></div>'
  +'<h1 class="font-display font-extrabold text-3xl mb-2">الخلفية وقاعدة البيانات</h1>'
- +'<p class="text-ink-400 text-sm leading-7 mb-8">المرحلة 1 نشطة (قاعدة بيانات + مصادقة حقيقية). المرحلة 2 جاهزة للتنفيذ: محرك AI حقيقي عبر Edge Functions + widget.js مستقل + معالجة ملفات وزحف حقيقية.</p>'
+ +'<p class="text-ink-400 text-sm leading-7 mb-8">إنشاء وحفظ وتعديل الودجات يتم الآن مباشرة عبر UPSERT في جدول <span class="ltr">widgets</span> — الحقل <span class="ltr">data</span> (jsonb) يحتوي التوكن وبيانات الودجت، فيجدُه verify-widget بلا أي 403.</p>'
  +'<div class="grid md:grid-cols-[1fr_280px] gap-5 items-start">'
  +'<div class="space-y-5">'
  +'<div class="glass rounded-2xl p-6">'
@@ -1357,11 +1349,11 @@ function renderSetup(){
  +'<div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">مراحل الإطلاق</h3>'
  +'<div class="space-y-2.5">'+phases.map(function(p,i){return '<div class="flex items-center gap-2.5 text-sm"><span class="w-6 h-6 rounded-full flex items-center justify-center text-[11px] flex-none '+(p[1]?'bg-tiffany-500 text-ink-950 font-bold':'bg-ink-800 text-ink-500')+'">'+(i+1)+'</span><span class="'+(p[1]?'text-ink-100':'text-ink-500')+'">'+p[0]+'</span>'+(p[1]?'<span class="mr-auto text-tiffany-400 flex-none">'+icon('check','w-4 h-4')+'</span>':'')+'</div>'}).join('')+'</div></div>'
  +'<div class="glass rounded-2xl p-6 text-xs text-ink-400 leading-6 space-y-2">'
- +'<p><b class="text-ink-200">ضمانات المرحلة 2</b></p>'
- +'<p>• مفتاح Gemini في متغيرات بيئة الخادم فقط — لا يصل للفرونت ولا للويدجت.</p>'
- +'<p>• حد الرسائل الشهري يُفرض داخل الدالة قبل أي استدعاء نموذج.</p>'
- +'<p>• حد عدد الـ Agents يُفرض بـ Trigger في قاعدة البيانات.</p>'
- +'<p>• الويدجت يقرأ الإعدادات الأحدث من الخادم عند كل تحميل صفحة.</p>'
+ +'<p><b class="text-ink-200">ضمانات الحفظ</b></p>'
+ +'<p>• إنشاء/حفظ/تعطيل/إعادة توليد التوكن = UPSERT فوري في <span class="ltr">widgets.data</span>.</p>'
+ +'<p>• مؤشر «جارٍ الحفظ...» ثم تأكيد «تم الحفظ ✔» بعد نجاح الخادم فعليًا.</p>'
+ +'<p>• أي فشل يُعلّم الودجت «غير متزامن» مع زر مزامنة فوري.</p>'
+ +'<p>• مفتاح Gemini في متغيرات بيئة الخادم فقط.</p>'
  +'</div>'
  +'</div></div>'
  +'<div id="sb-status" class="mt-5"></div>'
@@ -1545,8 +1537,10 @@ function pgWidgets(){
   +'<button data-action="embed" data-id="'+x.id+'" class="btn-ghost !py-2 text-xs">'+icon('code','w-3.5 h-3.5')+' كود التضمين</button>'
   +'<button data-action="go" data-to="#/test?wid='+x.id+'" class="btn-ghost !py-2 text-xs">'+icon('globe','w-3.5 h-3.5')+' اختبار حي</button>'
   +'<button data-action="del-widget" data-id="'+x.id+'" class="p-2 text-red-400 hover:bg-red-500/10 rounded-lg mr-auto">'+icon('trash','w-4 h-4')+'</button></div>'
-  +'<div class="text-[11px] mt-3 '+(x.enabled?'text-emerald-400':'text-red-400')+'">'+(x.enabled?'● نشط — يستقبل الرسائل':'● معطل — لن يظهر للزوار')+'</div></div>'}).join('');
- return '<div class="flex items-center justify-between mb-5 flex-wrap gap-3"><p class="text-sm text-ink-400">كل Widget مرتبط بـ Agent ويعمل بكود Embed مستقل.</p><button data-action="new-widget" class="btn-primary">'+icon('plus','w-4 h-4')+' Widget جديد</button></div>'
+  +'<div class="text-[11px] mt-3 '+(x.enabled?'text-emerald-400':'text-red-400')+'">'+(x.enabled?'● نشط — يستقبل الرسائل':'● معطل — لن يظهر للزوار')+(isRemote()&&!x.__unsynced?' • محفوظ في قاعدة البيانات':'')+'</div>'
+  +(x.__unsynced?'<div class="mt-2 flex items-center justify-between gap-2 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2 text-[11px] text-amber-300"><span>تعديلات غير متزامنة مع قاعدة البيانات — الويدجت المنشور لن يراها</span><button data-action="sync-widget" data-id="'+x.id+'" class="btn-ghost !py-1 !px-3 text-[11px] flex-none">مزامنة الآن</button></div>':'')
+  +'</div>'}).join('');
+ return '<div class="flex items-center justify-between mb-5 flex-wrap gap-3"><p class="text-sm text-ink-400">كل Widget يُحفظ مباشرة في جدول <span class="ltr">widgets</span> في Supabase (id + data.token).</p><button data-action="new-widget" class="btn-primary">'+icon('plus','w-4 h-4')+' Widget جديد</button></div>'
  +'<div class="grid md:grid-cols-2 gap-4">'+(cards||'<div class="md:col-span-2 glass rounded-2xl p-14 text-center text-ink-500">لا Widgets بعد.</div>')+'</div>';
 }
 var draft=null;
@@ -1720,7 +1714,7 @@ function pgBilling(){
  return '<div class="glass rounded-2xl p-6 mb-5">'
  +'<div class="flex flex-wrap items-center justify-between gap-3 mb-3"><h3 class="font-display font-bold">استخدام رسائل AI هذا الشهر</h3><span class="text-sm text-ink-400">'+w.usage.ai+' / '+cap+'</span></div>'
  +'<div class="h-3 bg-ink-850 rounded-full overflow-hidden"><div class="h-full bg-gradient-to-l from-tiffany-400 to-tiffany-600 rounded-full transition-all" style="width:'+pct+'%"></div></div>'
- +'<p class="text-[11px] text-ink-500 mt-2">الحد يُفرض الآن من الخادم داخل ai-respond قبل أي استدعاء نموذج. بوابة الدفع الحقيقية تصل في المرحلة 3.</p></div>'
+ +'<p class="text-[11px] text-ink-500 mt-2">الحد يُفرض من الخادم داخل ai-respond قبل أي استدعاء نموذج. بوابة الدفع الحقيقية تصل في المرحلة 3.</p></div>'
  +'<div class="grid md:grid-cols-3 gap-5 mb-6">'+plans+'</div>'
  +'<div class="glass rounded-2xl overflow-hidden"><div class="px-5 py-4 font-display font-bold border-b border-ink-800">الفواتير</div>'
  +'<div class="overflow-x-auto"><table class="w-full text-sm min-w-[560px]"><thead class="text-ink-500 text-xs"><tr><th class="text-right px-5 py-3">الفاتورة</th><th class="text-right px-5 py-3">الخطة</th><th class="text-right px-5 py-3">المبلغ</th><th class="text-right px-5 py-3">التاريخ</th><th class="text-right px-5 py-3"></th></tr></thead>'
@@ -1754,7 +1748,7 @@ function widgetModal(){
  +'<form id="f-widget" class="space-y-3">'
  +'<label class="lbl2">اسم الويدجت<input name="name" required class="inp-s" placeholder="مثال: ويدجت المتجر"></label>'
  +'<label class="lbl2">اربطه بـ Agent<select name="agentId" class="inp-s">'+ws().agents.map(function(a){return '<option value="'+a.id+'">'+esc(a.name)+'</option>'}).join('')+'</select></label>'
- +'<button class="btn-primary w-full">إنشاء وفتح الـ Builder</button></form>');
+ +'<button class="btn-primary w-full">إنشاء وحفظ في قاعدة البيانات</button></form>');
 }
 function embedModal(id){
  var w=ws().widgets.find(function(x){return x.id===id});if(!w)return;
@@ -1794,12 +1788,46 @@ document.addEventListener('click',function(e){
  else if(a==='del-agent'){if(confirm('حذف هذا الـ Agent؟')){ws().agents=ws().agents.filter(function(x){return x.id!==id});save();route()}}
  else if(a==='new-widget'){if(!ws().agents.length){toast('أنشئ Agent أولًا','err');go('#/app/agents');return}widgetModal()}
  else if(a==='open-builder'){draft=null;go('#/app/builder?id='+id)}
- else if(a==='save-widget'){var wS=cur(draft.id);if(wS){Object.assign(wS,draft);save();toast('تم حفظ إعدادات الويدجت'+(isRemote()?' ومزامنتها':''),'ok')}}
+ else if(a==='save-widget'){
+   var wS=cur(draft.id);
+   if(wS){
+     Object.assign(wS,draft);persist();
+     if(isRemote()){
+       var doneB=busy(t,'جارٍ الحفظ في قاعدة البيانات...');
+       syncWidgetToServer(wS).then(function(){
+         if(doneB)doneB();
+         toast('تم الحفظ في قاعدة البيانات ✔ — سينعكس على الويدجت المنشور فور تحميل الصفحة التالية','ok');
+         save();
+       }).catch(function(err){
+         wS.__unsynced=true;
+         if(doneB)doneB();
+         toast('فشل الحفظ في قاعدة البيانات: '+err.message,'err');
+         save();route();
+       });
+     }else{save();toast('تم حفظ إعدادات الويدجت','ok')}
+   }}
  else if(a==='embed')embedModal(id);
  else if(a==='copy-embed'){var wC=cur(id);if(wC){var api=apiBase()||'https://YOUR-PROJECT.supabase.co/functions/v1';copyText('<script src="https://cdn.aown.app/widget.js" data-widget-id="'+wC.id+'" data-token="'+wC.token+'" data-api="'+api+'" async><'+'/script>')}}
- else if(a==='regen'){var wR=cur(id);if(wR){wR.token=uid('tk_');save();toast('تم توليد رمز جديد — الرمز القديم لم يعد صالحًا','ok');embedModal(id)}}
- else if(a==='w-toggle'){var wT=cur(id);if(wT){wT.enabled=!wT.enabled;save();toast(wT.enabled?'تم تفعيل الويدجت':'تم تعطيل الويدجت','ok');
-   if(document.getElementById('modal-root').children.length)embedModal(id);else route()}}
+ else if(a==='regen'){
+   var wR=cur(id);
+   if(wR){
+     wR.token=uid('tk_');persist();
+     if(isRemote()){
+       var doneR=busy(t,'جارٍ التحديث في قاعدة البيانات...');
+       syncWidgetToServer(wR).then(function(){if(doneR)doneR();toast('تم توليد رمز جديد وحفظه في قاعدة البيانات ✔','ok');embedModal(id);save()})
+       .catch(function(err){wR.__unsynced=true;if(doneR)doneR();toast('فشل حفظ الرمز الجديد في قاعدة البيانات: '+err.message,'err');embedModal(id);save()});
+     }else{save();toast('تم توليد رمز جديد — الرمز القديم لم يعد صالحًا','ok');embedModal(id)}
+   }}
+ else if(a==='w-toggle'){
+   var wT=cur(id);
+   if(wT){
+     wT.enabled=!wT.enabled;persist();
+     var afterT=function(){if(document.getElementById('modal-root').children.length)embedModal(id);else route()};
+     if(isRemote()){
+       syncWidgetToServer(wT).then(function(){toast(wT.enabled?'تم تفعيل الويدجت وحفظه في قاعدة البيانات ✔':'تم تعطيل الويدجت وحفظه في قاعدة البيانات ✔','ok');save();afterT()})
+       .catch(function(err){wT.__unsynced=true;toast('حدث التغيير محليًا وفشلت المزامنة: '+err.message,'err');save();afterT()});
+     }else{save();toast(wT.enabled?'تم تفعيل الويدجت':'تم تعطيل الويدجت','ok');afterT()}
+   }}
  else if(a==='modal-close')closeModal();
  else if(a==='handoff'){var c=ws().convos.find(function(x){return x.id===id});if(c){c.status='handoff';c.messages.push({from:'system',text:'تم تحويل المحادثة يدويًا لفريق الدعم.',at:now()});save();route()}}
  else if(a==='ai-back'){var c2=ws().convos.find(function(x){return x.id===id});if(c2){c2.status='active';save();route()}}
@@ -1823,6 +1851,21 @@ document.addEventListener('click',function(e){
  else if(a==='sb-disconnect'){cfg=null;sb=null;remoteBroken=false;localStorage.removeItem('aown_cfg');toast('تم فصل الاتصال — العودة للوضع المحلي');route()}
  else if(a==='eng-tab'){engTab=id;route()}
  else if(a==='copy-eng'){if(engTab==='steps'){var tmp=document.createElement('div');tmp.innerHTML=ENG_STEPS;copyText(tmp.textContent.trim())}else copyText(engSource(engTab))}
+ else if(a==='sync-widget'){
+   var wY=cur(id);
+   if(wY){
+     var doneY=busy(t,'جارٍ المزامنة...');
+     syncWidgetToServer(wY).then(function(){if(doneY)doneY();toast('تمت المزامنة مع قاعدة البيانات ✔','ok');save();route()})
+     .catch(function(err){if(doneY)doneY();toast('فشلت المزامنة: '+err.message,'err');route()});
+   }}
+ else if(a==='del-widget'){
+   if(confirm('حذف هذا الويدجت؟')){
+     ws().widgets=ws().widgets.filter(function(x){return x.id!==id});persist();
+     if(isRemote()){
+       sbDeleteRow('widgets',id).then(function(){toast('تم حذف الويدجت من قاعدة البيانات ✔','ok');save();route()})
+       .catch(function(err){toast('حُذف محليًا لكن فشل الحذف من قاعدة البيانات: '+err.message,'err');save();route()});
+     }else{save();route()}
+   }}
  }catch(err){console.error(err);toast('تعذر تنفيذ العملية','err')}
 });
 document.addEventListener('input',function(e){
@@ -1878,7 +1921,7 @@ document.addEventListener('change',function(e){
  draft[b]=tgt.type==='checkbox'?tgt.checked:tgt.value;
  route();
 });
-document.addEventListener('submit',function(e){
+document.addEventListener('submit',async function(e){
  var f=e.target;if(!f||!f.id)return;
  if(f.classList&&f.classList.contains('w-form'))return;
  e.preventDefault();
@@ -1902,7 +1945,7 @@ document.addEventListener('submit',function(e){
        if(st)st.innerHTML='<div class="glass rounded-2xl p-5 text-sm text-red-300 border-red-500/30">⚠️ '+esc(msg)+'<div class="text-xs text-ink-400 mt-2">تأكد من تشغيل مخطط SQL في SQL Editor ثم أعد الفحص بالحفظ مرة أخرى.</div></div>';
      }else{
        toast('الاتصال ناجح وقاعدة البيانات جاهزة ✔','ok');
-       if(st)st.innerHTML='<div class="glass rounded-2xl p-5 text-sm text-emerald-300 border-emerald-500/30">✅ Supabase جاهز. تابع تبويبات «المرحلة 2» لنشر محرك الذكاء والويدجت الحقيقي.</div>';
+       if(st)st.innerHTML='<div class="glass rounded-2xl p-5 text-sm text-emerald-300 border-emerald-500/30">✅ Supabase جاهز. أنشئ ويدجت الآن وسيُحفظ مباشرة في جدول <span class="ltr">widgets</span>.</div>';
        route();
      }});
    return}
@@ -1955,11 +1998,46 @@ document.addEventListener('submit',function(e){
      if(res.error){toast(res.error.message,'err');if(btn){btn.disabled=false;btn.textContent='حفظ كلمة المرور الجديدة'}return}
      closeModal();toast('تم تحديث كلمة المرور بنجاح ✔','ok');go('#/login')});
    return}
- else if(f.id==='f-agent'){var idv=fd.get('id');var data=Object.fromEntries(fd);
-   if(idv){var ea=ws().agents.find(function(x){return x.id===idv});if(ea)Object.assign(ea,data)}
-   else ws().agents.push(Object.assign({},data,{id:uid('ag_'),createdAt:now()}));
-   save();closeModal();toast('تم حفظ الـ Agent'+(isRemote()?' ومزامنته':''),'ok');route()}
- else if(f.id==='f-widget'){var nw=defWidget(fd.get('agentId'),String(fd.get('name')).trim());ws().widgets.push(nw);save();closeModal();draft=null;go('#/app/builder?id='+nw.id)}
+ else if(f.id==='f-agent'){
+   var idv=fd.get('id');var data=Object.fromEntries(fd);
+   var agentObj;
+   if(idv){agentObj=ws().agents.find(function(x){return x.id===idv});if(agentObj)Object.assign(agentObj,data)}
+   else{agentObj=Object.assign({},data,{id:uid('ag_'),createdAt:now()});ws().agents.push(agentObj)}
+   persist();
+   if(isRemote()&&agentObj){
+     var bA=f.querySelector('button');var doneA=busy(bA,'جارٍ الحفظ في قاعدة البيانات...');
+     try{
+       await sbUpsert('agents',agentObj);
+       if(doneA)doneA();
+       toast('تم حفظ الـ Agent في قاعدة البيانات ✔','ok');
+       save();closeModal();route();
+     }catch(err){
+       if(doneA)doneA();
+       toast('فشل حفظ الـ Agent في قاعدة البيانات: '+err.message,'err');
+       save();closeModal();route();
+     }
+   }else{save();closeModal();toast('تم حفظ الـ Agent','ok');route()}
+   return}
+ else if(f.id==='f-widget'){
+   /* إنشاء Widget: يُكتب فورًا في جدول widgets (id + workspace_id + data)
+      ليصبح حقيقيًا ويجده verify-widget بدون 403 */
+   var nw=defWidget(fd.get('agentId'),String(fd.get('name')).trim());
+   ws().widgets.push(nw);persist();
+   var bW=f.querySelector('button');
+   if(isRemote()){
+     var doneW=busy(bW,'جارٍ الحفظ في قاعدة البيانات...');
+     syncWidgetToServer(nw).then(function(){
+       if(doneW)doneW();
+       toast('تم إنشاء الويدجت في قاعدة البيانات ✔ — التوكن والـ ID حقيقيان الآن','ok');
+       save();closeModal();draft=null;go('#/app/builder?id='+nw.id);
+     }).catch(function(err){
+       nw.__unsynced=true;
+       if(doneW)doneW();
+       toast('أُنشئ محليًا لكن فشلت المزامنة: '+err.message+' — استخدم زر «مزامنة الآن» من قائمة الودجات','err');
+       save();closeModal();draft=null;go('#/app/builder?id='+nw.id);
+     });
+   }else{save();closeModal();draft=null;go('#/app/builder?id='+nw.id)}
+   return}
  else if(f.id==='f-dash-msg'){var cd=ws().convos.find(function(x){return x.id===selConvo});if(!cd)return;
    var txt=String(fd.get('m')||'').trim();if(!txt)return;
    cd.messages.push({from:'team',text:txt,at:now()});cd.updatedAt=now();save();route()}
@@ -2021,12 +2099,6 @@ async function boot(){
  route();
 }
 boot();
-</script>
-  <script 
-  src="https://hsnq2022022-cyber.github.io/chat/widget.js" 
-  data-api="https://mlbofdtmxjxjnjdwivqo.supabase.co/functions/v1" 
-  data-widget-id="my-first-widget"
-  data-token="public">
 </script>
 </body>
 </html>
