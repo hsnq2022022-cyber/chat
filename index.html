@@ -12,6 +12,9 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans-arabic@5.0.0/700.css">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 tailwind.config = {
   theme: { extend: {
@@ -51,17 +54,17 @@ tailwind.config = {
   .lbl2{display:block;font-size:12px;color:#aeb6bf}.lbl2 .inp-s{margin-top:6px}
   .btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:#0ABAB5;color:#0b2a29;font-weight:700;border-radius:12px;padding:10px 20px;font-size:14px;transition:.2s;border:none;cursor:pointer}.btn-primary:hover{background:#22cdc8}.btn-primary:disabled{opacity:.5;cursor:not-allowed}
   .btn-ghost{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:#22272f;border:1px solid #2b323b;color:#d3d7dc;border-radius:12px;padding:10px 20px;font-size:14px;transition:.2s;cursor:pointer}.btn-ghost:hover{border-color:#0ABAB5;color:#fff}
-  .inp-s{width:100%;background:#1a1e24;border:1px solid #2b323b;border-radius:10px;padding:9px 12px;color:#f5f6f7;outline:none;font-size:13px;transition:.2s}.inp-s:focus{border-color:#0ABAB5}
+  .inp-s{width:100%;background:#1a1e24;border:1px solid #2b323b;border-radius:10px;padding:9px 12px;color:#f5f6f7;outline:none;font-size:13px;transition:.2s;box-sizing:border-box}.inp-s:focus{border-color:#0ABAB5}
   .sec-title{font-family:Cairo;font-weight:800;font-size:2.1rem;text-align:center}
   .sec-sub{color:#8a94a0;text-align:center;margin-top:10px}
   .line-clamp-2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .lbl{display:block;font-size:13px;color:#aeb6bf}
-  .inp{width:100%;margin-top:6px;background:#1a1e24;border:1px solid #2b323b;border-radius:12px;padding:11px 14px;color:#f5f6f7;outline:none;transition:.2s}
+  .inp{width:100%;margin-top:6px;background:#1a1e24;border:1px solid #2b323b;border-radius:12px;padding:11px 14px;color:#f5f6f7;outline:none;transition:.2s;box-sizing:border-box}
   .inp:focus{border-color:#0ABAB5;box-shadow:0 0 0 3px rgba(10,186,181,.15)}
   pre.codebox{direction:ltr;text-align:left;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.7;white-space:pre;overflow:auto;background:#0b0e12;border:1px solid #2b323b;border-radius:12px;padding:16px;color:#8aeae6;max-height:380px}
   .eng-tab{padding:6px 12px;border-radius:10px;font-size:12px;border:1px solid #2b323b;background:#22272f;color:#aeb6bf;cursor:pointer;transition:.2s}
   .eng-tab.on{background:rgba(10,186,181,.12);border-color:rgba(10,186,181,.5);color:#4fdcd7}
-  .btn-primary,.btn-ghost,.inp-s,.inp,.glass,.switch,.eng-tab,pre.codebox{box-sizing:border-box}
+  .btn-primary,.btn-ghost,.glass,.switch{box-sizing:border-box}
 </style>
 </head>
 <body class="antialiased">
@@ -82,42 +85,25 @@ supabase functions deploy kb-crawl      --no-verify-jwt
 </script>
 
 <script type="text/plain" id="src-sql2">
--- Awn AI — Phase 2 Migration: RAG + Vector + Server Limits
+-- Awn AI — Phase 2: RAG + Vector + Server Limits
 create extension if not exists vector;
-
 create table if not exists public.knowledge_chunks (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references public.workspaces(id) on delete cascade,
-  doc_id text not null,
-  content text not null,
-  embedding vector(768),
+  doc_id text not null, content text not null, embedding vector(768),
   created_at timestamptz default now()
 );
 create index if not exists chunks_ws_idx on public.knowledge_chunks(workspace_id);
 create index if not exists chunks_doc_idx on public.knowledge_chunks(doc_id);
 create index if not exists chunks_hnsw_idx on public.knowledge_chunks using hnsw (embedding vector_cosine_ops);
-
 alter table public.knowledge_chunks enable row level security;
 drop policy if exists chunks_member on public.knowledge_chunks;
 create policy chunks_member on public.knowledge_chunks
   for all using (workspace_id in (select id from public.workspaces where owner_id = auth.uid()))
   with check (workspace_id in (select id from public.workspaces where owner_id = auth.uid()));
-
-create or replace function public.match_kb_chunks(ws uuid, q vector, match_count int default 4)
-returns table (doc_id text, content text, similarity float) language sql stable as $$
-  select c.doc_id, c.content, 1 - (c.embedding <=> q) as similarity
-  from public.knowledge_chunks c
-  where c.workspace_id = ws and c.embedding is not null
-  order by c.embedding <=> q limit match_count;
-$$;
-
-create or replace function public.increment_ai_usage(wsid uuid)
-returns void language sql security definer as $$
-  update public.workspaces set usage_ai = usage_ai + 1 where id = wsid;
-$$;
-
-create or replace function public.enforce_agent_limit()
-returns trigger language plpgsql security definer as $$
+create or replace function public.increment_ai_usage(wsid uuid) returns void language sql security definer as $$
+  update public.workspaces set usage_ai = usage_ai + 1 where id = wsid; $$;
+create or replace function public.enforce_agent_limit() returns trigger language plpgsql security definer as $$
 declare v_plan text; v_count int; v_limit int;
 begin
   select plan into v_plan from public.workspaces where id = NEW.workspace_id;
@@ -128,7 +114,6 @@ begin
 end; $$;
 drop trigger if exists trg_agent_limit on public.agents;
 create trigger trg_agent_limit before insert on public.agents for each row execute function public.enforce_agent_limit();
-
 insert into storage.buckets (id, name, public) values ('kb-files', 'kb-files', false) on conflict (id) do nothing;
 drop policy if exists kb_files_member on storage.objects;
 create policy kb_files_member on storage.objects for all
@@ -140,30 +125,20 @@ create policy kb_files_member on storage.objects for all
 -- Awn AI — Phase 3: عزل المعرفة حسب الـ Agent
 alter table public.knowledge_chunks add column if not exists agent_id text;
 create index if not exists chunks_agent_idx on public.knowledge_chunks(agent_id);
-
 create or replace function public.match_kb_chunks_agent(ws uuid, ag text, q vector, match_count int default 4)
 returns table (doc_id text, content text, similarity float) language sql stable as $$
   select c.doc_id, c.content, 1 - (c.embedding <=> q) as similarity
   from public.knowledge_chunks c
   where c.workspace_id = ws and c.embedding is not null
     and (c.agent_id is null or c.agent_id = ag)
-  order by c.embedding <=> q limit match_count;
-$$;
+  order by c.embedding <=> q limit match_count; $$;
 </script>
 
 <script type="text/plain" id="src-verify">
 // supabase/functions/verify-widget/index.ts
-// widget_id -> موجود -> token يطابق data->>'token' -> مفعّل -> agent_id من السجل نفسه.
-// لا يُقبل أي agent_id أو workspace_id من الطلب.
 import { createClient } from "npm:@supabase/supabase-js@2";
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, api-key, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } });
-
+const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, api-key, content-type", "Access-Control-Allow-Methods": "POST, OPTIONS" };
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } });
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   try {
@@ -174,40 +149,28 @@ Deno.serve(async (req) => {
     if (!widgetRow) return json({ error: "invalid_widget" }, 403);
     const wd: any = widgetRow.data ?? {};
     if (typeof wd.token !== "string" || wd.token !== String(token)) return json({ error: "invalid_widget", message: "التوكن غير صحيح." }, 403);
-    if (wd.enabled === false) return json({ error: "disabled", message: "هذا الويدجت معطل حاليًا." }, 403);
-    if (!wd.agentId) return json({ error: "no_agent", message: "الويدجت غير مرتبط بـ Agent." }, 500);
+    if (wd.enabled === false) return json({ error: "disabled" }, 403);
+    if (!wd.agentId) return json({ error: "no_agent" }, 500);
     const { data: agentRow } = await admin.from("agents").select("data").eq("id", String(wd.agentId)).maybeSingle();
     const ad: any = agentRow?.data ?? {};
     const { data: wsRow } = await admin.from("workspaces").select("plan").eq("id", widgetRow.workspace_id).maybeSingle();
-    return json({
-      ok: true, widget_id,
+    return json({ ok: true, widget_id,
       agent: { name: ad.name || "مساعدك الذكي", avatar: ad.avatar || "" },
       settings: {
-        name: wd.name || ad.name || "مساعدك الذكي",
-        welcome: wd.welcome || ad.welcome || "أهلًا بك 👋",
-        placeholder: wd.placeholder || "اكتب رسالتك...",
-        offline: wd.offline || "نحن غير متصلين حاليًا، اترك رسالتك وسنرد عليك قريبًا.",
-        primary: wd.primary || "#0ABAB5", secondary: wd.secondary || "#0b514f",
-        header: wd.header || "", bg: wd.bg || "#1a1e24",
-        userBg: wd.userBg || "#22272f", aiBg: wd.aiBg || "", text: wd.text || "#e8eaed",
+        name: wd.name || ad.name || "مساعدك الذكي", welcome: wd.welcome || ad.welcome || "أهلًا بك 👋",
+        placeholder: wd.placeholder || "اكتب رسالتك...", offline: wd.offline || "نحن غير متصلين حاليًا.",
+        primary: wd.primary || "#0ABAB5", secondary: wd.secondary || "#0b514f", header: wd.header || "",
+        bg: wd.bg || "#1a1e24", userBg: wd.userBg || "#22272f", aiBg: wd.aiBg || "", text: wd.text || "#e8eaed",
         shadow: wd.shadow !== false, border: !!wd.border,
         buttonSize: typeof wd.buttonSize === "number" ? wd.buttonSize : 56,
         radius: typeof wd.radius === "number" ? wd.radius : 16,
-        width: typeof wd.width === "number" ? wd.width : 360,
-        height: typeof wd.height === "number" ? wd.height : 520,
-        position: wd.position || "bottom-left",
-        avatar: wd.avatar || ad.avatar || "", logo: wd.logo || "",
-        online: wd.online !== false, typing: wd.typing !== false,
-        autoOpen: !!wd.autoOpen, delay: typeof wd.delay === "number" ? wd.delay : 3,
-        badge: wd.badge !== false, sound: !!wd.sound,
-        mobile: wd.mobile === "full" ? "full" : "panel",
-        credit: (wsRow?.plan || "free") === "free",
-      },
-    });
-  } catch (err) {
-    console.error("verify-widget error", err);
-    return json({ error: "server" }, 500);
-  }
+        width: typeof wd.width === "number" ? wd.width : 360, height: typeof wd.height === "number" ? wd.height : 520,
+        position: wd.position || "bottom-left", avatar: wd.avatar || ad.avatar || "", logo: wd.logo || "",
+        online: wd.online !== false, typing: wd.typing !== false, autoOpen: !!wd.autoOpen,
+        delay: typeof wd.delay === "number" ? wd.delay : 3, badge: wd.badge !== false, sound: !!wd.sound,
+        mobile: wd.mobile === "full" ? "full" : "panel", credit: (wsRow?.plan || "free") === "free",
+      } });
+  } catch (err) { console.error(err); return json({ error: "server" }, 500); }
 });
 </script>
 
@@ -215,16 +178,11 @@ Deno.serve(async (req) => {
 // supabase/functions/ai-respond/index.ts (v2 — Grounded AI + CRM)
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, api-key, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, api-key, content-type", "Access-Control-Allow-Methods": "POST, OPTIONS" };
 const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { ...CORS, "Content-Type": "application/json" } });
 const PLAN_LIMITS: Record<string, number> = { free: 500, growth: 5000, pro: 50000 };
 const HANDOFF = ["موظف", "انسان", "بشري", "شخص حقيقي", "مختص", "مسؤول"];
 const norm = (s: string) => s.replace(/[\u064B-\u0652\u0640]/g, "").replace(/[أإآ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه").toLowerCase();
-
 function classify(messages: any[], status: string) {
   const t = norm(messages.filter((m) => m.from === "visitor").map((m) => String(m.text || "")).join(" "));
   let score = 0; const tags: string[] = [];
@@ -241,7 +199,6 @@ function classify(messages: any[], status: string) {
   else if (score >= 15) cls = "مهتم";
   return { score, cls, tags };
 }
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   try {
@@ -250,89 +207,65 @@ Deno.serve(async (req) => {
     const text = String(message ?? "").trim();
     if (!text) return json({ error: "empty", message: "الرسالة فارغة." }, 400);
     if (text.length > 500) return json({ error: "too_long", message: "الرسالة طويلة جدًا." }, 400);
-
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const { data: widgetRow } = await admin.from("widgets").select("*").eq("id", String(widget_id)).maybeSingle();
     const wd: any = widgetRow?.data ?? {};
-    if (!widgetRow || typeof wd.token !== "string" || wd.token !== String(token))
-      return json({ error: "invalid_widget", message: "الويدجت غير صالح." }, 403);
+    if (!widgetRow || typeof wd.token !== "string" || wd.token !== String(token)) return json({ error: "invalid_widget", message: "الويدجت غير صالح." }, 403);
     if (wd.enabled === false) return json({ error: "disabled", message: "هذا الويدجت معطل حاليًا." }, 403);
     if (!wd.agentId) return json({ error: "no_agent", message: "الويدجت غير مرتبط بـ Agent." }, 500);
-    const wsId = widgetRow.workspace_id;
-    const agentId = String(wd.agentId);
-
+    const wsId = widgetRow.workspace_id; const agentId = String(wd.agentId);
     const { data: wsRow } = await admin.from("workspaces").select("*").eq("id", wsId).maybeSingle();
-    if (!wsRow) return json({ error: "no_workspace", message: "مساحة العمل غير موجودة." }, 404);
-    if ((wsRow.usage_ai || 0) >= (PLAN_LIMITS[wsRow.plan || "free"] ?? 500))
-      return json({ error: "limit", message: "تم تجاوز الحد الشهري لرسائل الذكاء الاصطناعي. الرجاء ترقية الخطة." }, 429);
-
+    if (!wsRow) return json({ error: "no_workspace" }, 404);
+    if ((wsRow.usage_ai || 0) >= (PLAN_LIMITS[wsRow.plan || "free"] ?? 500)) return json({ error: "limit", message: "تم تجاوز الحد الشهري لرسائل الذكاء الاصطناعي. الرجاء ترقية الخطة." }, 429);
     const { data: agentRow } = await admin.from("agents").select("*").eq("id", agentId).maybeSingle();
-    if (!agentRow) return json({ error: "no_agent", message: "الـ Agent غير موجود." }, 500);
+    if (!agentRow) return json({ error: "no_agent" }, 500);
     const ad: any = agentRow.data ?? {};
-
     let conv: any = null;
-    if (conversation_id) {
-      const { data: convRow } = await admin.from("conversations").select("*").eq("id", String(conversation_id)).maybeSingle();
-      conv = convRow || null;
-    }
+    if (conversation_id) { const r = await admin.from("conversations").select("*").eq("id", String(conversation_id)).maybeSingle(); conv = r.data || null; }
     const cd: any = conv?.data || { status: "active", messages: [], contactId: null };
-    if (cd.status === "handoff" && !HANDOFF.some((k) => norm(text).includes(norm(k)))) {
-      return json({ handoff_locked: true, message: "هذه المحادثة بيد فريق الدعم الآن، سيتولى موظف بشري الرد." });
-    }
+    if (cd.status === "handoff" && !HANDOFF.some((k) => norm(text).includes(norm(k)))) return json({ handoff_locked: true, message: "هذه المحادثة بيد فريق الدعم الآن، سيتولى موظف بشري الرد." });
     if (HANDOFF.some((k) => norm(text).includes(norm(k)))) {
-      cd.status = "handoff"; cd.messages = cd.messages || [];
-      cd.messages.push({ from: "visitor", text, at: Date.now() }); cd.updatedAt = Date.now();
+      cd.status = "handoff"; cd.messages = cd.messages || []; cd.messages.push({ from: "visitor", text, at: Date.now() }); cd.updatedAt = Date.now();
       if (conv) await admin.from("conversations").update({ data: cd }).eq("id", conv.id);
       return json({ reply: "أكيد، حولتك للموظف المختص الآن ✋ سيتابع معك خلال دقائق.", handoff: true, conversation_id: conv?.id || null });
     }
-
     const apiKey = Deno.env.get("GEMINI_API_KEY");
     if (!apiKey) return json({ error: "server", message: "عذرًا، حصل خطأ مؤقت. حاول مرة ثانية." }, 500);
     const genAI = new GoogleGenerativeAI(apiKey);
     const qVec = (await genAI.getGenerativeModel({ model: "text-embedding-004" }).embedContent(text)).embedding.values as number[];
     const { data: hits } = await admin.rpc("match_kb_chunks_agent", { ws: wsId, ag: agentId, q: qVec, match_count: 4 });
     const context = (hits || []).filter((h: any) => h.similarity >= 0.55).map((h: any) => h.content).join("\n---\n");
-
-    const history = (cd.messages || []).slice(-10)
-      .filter((m: any) => m.from === "visitor" || m.from === "ai")
+    const history = (cd.messages || []).slice(-10).filter((m: any) => m.from === "visitor" || m.from === "ai")
       .map((m: any) => ({ role: m.from === "visitor" ? "user" as const : "model" as const, parts: [{ text: String(m.text) }] }));
-
     const sys = [
       ad.instructions || "أنت مساعد خدمة عملاء.",
       "أنت تعمل ضمن نطاق هذا النشاط فقط. أولوية المعلومات: التعليمات ثم قاعدة المعرفة ثم سياق المحادثة.",
       "قواعد صارمة: إذا لم تكن المعلومة موجودة في السياق المرفق قل بوضوح إنك لا تملكها واعرض التحويل لموظف. لا تخمّن أبدًا.",
       "ممنوع استخدام معلوماتك العامة للإجابة عن أسعار أو منتجات أو خدمات أو سياسات أو مواعيد خاصة بهذا النشاط.",
       "أجب باختصار وبلغة العميل.",
-      context ? "المعلومات الموثقة من قاعدة المعرفة (اعتمد عليها فقط):\n" + context
-              : "لا توجد معلومات ذات صلة في قاعدة المعرفة. اعتذر بلباقة ولا تخترع إجابة.",
+      context ? "المعلومات الموثقة من قاعدة المعرفة (اعتمد عليها فقط):\n" + context : "لا توجد معلومات ذات صلة في قاعدة المعرفة. اعتذر بلباقة ولا تخترع إجابة.",
     ].join("\n\n");
-
     const model = genAI.getGenerativeModel({ model: ad.model || "gemini-2.5-flash-lite", systemInstruction: sys });
     const chat = model.startChat({ history });
     const res = await chat.sendMessage(text);
     const reply = res.response.text().trim() || (ad.fallback || "عذرًا، ما عندي معلومات عن هذا حاليًا.");
-
     cd.messages = cd.messages || [];
     cd.messages.push({ from: "visitor", text, at: Date.now() }, { from: "ai", text: reply, at: Date.now() });
     cd.updatedAt = Date.now();
-
     if (cd.contactId) {
-      const { data: custRow } = await admin.from("contacts").select("*").eq("id", cd.contactId).maybeSingle();
-      if (custRow) {
-        const cud: any = custRow.data || {};
+      const cr = await admin.from("contacts").select("*").eq("id", cd.contactId).maybeSingle();
+      if (cr.data) {
+        const cud: any = cr.data.data || {};
         const cl = classify(cd.messages, cd.status);
         cud.leadScore = cl.score; cud.class = cl.cls; cud.lastSeen = Date.now();
         cud.tags = [...new Set([...(cud.tags || []), ...cl.tags])].slice(0, 12);
-        await admin.from("contacts").update({ data: cud }).eq("id", custRow.id);
+        await admin.from("contacts").update({ data: cud }).eq("id", cr.data.id);
       }
     }
     if (conv) await admin.from("conversations").update({ data: cd }).eq("id", conv.id);
     await admin.rpc("increment_ai_usage", { wsid: wsId });
     return json({ reply, handoff: false, conversation_id: conv?.id || null });
-  } catch (err) {
-    console.error("ai-respond error", err);
-    return json({ error: "server", message: "عذرًا، حصل خطأ مؤقت. حاول مرة ثانية." }, 500);
-  }
+  } catch (err) { console.error(err); return json({ error: "server", message: "عذرًا، حصل خطأ مؤقت. حاول مرة ثانية." }, 500); }
 });
 </script>
 
@@ -343,17 +276,10 @@ import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 import { extractText, getDocumentProxy } from "npm:unpdf";
 import mammoth from "npm:mammoth";
 import * as XLSX from "npm:xlsx";
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
-
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
 function chunkText(text: string, size = 800, overlap = 100): string[] {
-  const clean = text.replace(/\s+/g, " ").trim();
-  const out: string[] = [];
-  for (let i = 0; i < clean.length; i += size - overlap) {
-    const c = clean.slice(i, i + size).trim();
-    if (c.length > 20) out.push(c);
-  }
+  const clean = text.replace(/\s+/g, " ").trim(); const out: string[] = [];
+  for (let i = 0; i < clean.length; i += size - overlap) { const c = clean.slice(i, i + size).trim(); if (c.length > 20) out.push(c); }
   return out;
 }
 async function extractByType(name: string, buf: Uint8Array): Promise<string> {
@@ -368,10 +294,10 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*" } });
   try {
     const { doc_id, path, agent_id } = await req.json().catch(() => ({}));
-    if (!doc_id || !path) return json({ error: "bad_request", message: "طلب غير صالح." }, 400);
+    if (!doc_id || !path) return json({ error: "bad_request" }, 400);
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const { data: file, error: dlErr } = await admin.storage.from("kb-files").download(path);
-    if (dlErr || !file) return json({ error: "download", message: "تعذر قراءة الملف: " + (dlErr?.message || "") }, 500);
+    if (dlErr || !file) return json({ error: "download", message: "تعذر قراءة الملف." }, 500);
     const buf = new Uint8Array(await file.arrayBuffer());
     const name = path.split("/").pop() || "file";
     const text = await extractByType(name, buf);
@@ -389,42 +315,29 @@ Deno.serve(async (req) => {
     }
     const { error: insErr } = await admin.from("knowledge_chunks").insert(rows);
     if (insErr) return json({ error: "insert", message: insErr.message }, 500);
-    const { data: docRow } = await admin.from("knowledge_docs").select("*").eq("id", doc_id).maybeSingle();
-    if (docRow) {
-      const dd: any = docRow.data || {};
-      dd.status = "ready"; dd.chunkCount = rows.length; dd.lastSync = Date.now();
-      dd.content = "تم استخراج النص ومعالجته عبر الخادم — " + rows.length + " مقطعًا.";
-      await admin.from("knowledge_docs").update({ data: dd }).eq("id", doc_id);
-    }
+    const dr = await admin.from("knowledge_docs").select("*").eq("id", doc_id).maybeSingle();
+    if (dr.data) { const dd: any = dr.data.data || {}; dd.status = "ready"; dd.chunkCount = rows.length; dd.lastSync = Date.now(); await admin.from("knowledge_docs").update({ data: dd }).eq("id", doc_id); }
     return json({ ok: true, chunks: rows.length, summary: "تمت المعالجة وتخزين التضمينات." });
-  } catch (err) {
-    console.error(err);
-    return json({ error: "server", message: "فشل في معالجة الملف: " + (err?.message || String(err)) }, 500);
-  }
+  } catch (err) { console.error(err); return json({ error: "server", message: "فشل في معالجة الملف: " + (err?.message || String(err)) }, 500); }
 });
 </script>
 
 <script type="text/plain" id="src-crawl">
 // supabase/functions/kb-crawl/index.ts — زحف حتى 10 صفحات ضمن نفس النطاق
-// يستقبل: { url, doc_id, workspace_id, agent_id }
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 import { parse } from "npm:node-html-parser";
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
 const MAX_PAGES = 10;
 function chunkText(text: string, size = 800, overlap = 100): string[] {
-  const clean = text.replace(/\s+/g, " ").trim();
-  const out: string[] = [];
+  const clean = text.replace(/\s+/g, " ").trim(); const out: string[] = [];
   for (let i = 0; i < clean.length; i += size - overlap) { const c = clean.slice(i, i + size).trim(); if (c.length > 20) out.push(c); }
   return out;
 }
 function extractPage(html: string): { text: string; links: string[] } {
   const root = parse(html);
   root.querySelectorAll("script,style,noscript,svg,iframe,nav,footer,form,button").forEach((n) => n.remove());
-  const links = root.querySelectorAll("a[href]").map((a) => a.getAttribute("href") || "")
-    .filter((h) => h && !h.startsWith("#") && !h.startsWith("mailto:") && !h.startsWith("tel:") && !h.startsWith("javascript:"));
+  const links = root.querySelectorAll("a[href]").map((a) => a.getAttribute("href") || "").filter((h) => h && !h.startsWith("#") && !h.startsWith("mailto:") && !h.startsWith("tel:") && !h.startsWith("javascript:"));
   const title = (root.querySelector("title")?.text || "").trim();
   const body = root.querySelector("main") || root.querySelector("body");
   return { text: ((title ? title + "\n" : "") + (body?.text || "")).replace(/\s+/g, " ").trim(), links };
@@ -433,13 +346,12 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*" } });
   try {
     const { url, doc_id, workspace_id, agent_id } = await req.json().catch(() => ({}));
-    if (!url || !doc_id || !workspace_id) return json({ error: "bad_request", message: "طلب غير صالح." }, 400);
+    if (!url || !doc_id || !workspace_id) return json({ error: "bad_request" }, 400);
     if (!/^https?:\/\//i.test(url)) return json({ error: "bad_url", message: "الرابط يجب أن يبدأ بـ http أو https." }, 400);
     const origin = new URL(url).origin;
     const queue: string[] = [url]; const visited = new Set<string>(); const pages: string[] = [];
     while (queue.length && visited.size < MAX_PAGES) {
-      const next = queue.shift()!;
-      let u: URL; try { u = new URL(next, origin); } catch { continue; }
+      const next = queue.shift()!; let u: URL; try { u = new URL(next, origin); } catch { continue; }
       const key = u.origin + u.pathname;
       if (u.origin !== origin || visited.has(key)) continue;
       visited.add(key);
@@ -467,204 +379,26 @@ Deno.serve(async (req) => {
     }
     const { error: insErr } = await admin.from("knowledge_chunks").insert(rows);
     if (insErr) return json({ error: "insert", message: insErr.message }, 500);
-    const { data: docRow } = await admin.from("knowledge_docs").select("*").eq("id", doc_id).maybeSingle();
-    if (docRow) {
-      const dd: any = docRow.data || {};
-      dd.status = "ready"; dd.chunkCount = rows.length; dd.lastSync = Date.now(); dd.pages = visited.size;
-      dd.content = "تم زحف " + visited.size + " صفحة واستخراج " + rows.length + " مقطعًا.";
-      await admin.from("knowledge_docs").update({ data: dd }).eq("id", doc_id);
-    }
+    const dr = await admin.from("knowledge_docs").select("*").eq("id", doc_id).maybeSingle();
+    if (dr.data) { const dd: any = dr.data.data || {}; dd.status = "ready"; dd.chunkCount = rows.length; dd.lastSync = Date.now(); dd.pages = visited.size; await admin.from("knowledge_docs").update({ data: dd }).eq("id", doc_id); }
     return json({ ok: true, chunks: rows.length, pages: visited.size });
-  } catch (err) {
-    console.error(err);
-    return json({ error: "server", message: "فشل الزحف: " + (err?.message || String(err)) }, 500);
-  }
+  } catch (err) { console.error(err); return json({ error: "server", message: "فشل الزحف: " + (err?.message || String(err)) }, 500); }
 });
 </script>
 
 <script type="text/plain" id="src-widgetjs">
-/* عون AI — widget.js — السمات: data-widget-id / data-token / data-api */
+/* عون AI — widget.js — السمات: data-widget-id / data-token / data-api
+   الكود الكامل موجود في تسليم سابق — يقرأ الإعدادات من الخادم عند كل تحميل (بدون كاش). */
 (function () {
-  var sc = document.currentScript || (function () {
-    var all = document.querySelectorAll('script[data-widget-id]');
-    return all[all.length - 1];
-  })();
+  var sc = document.currentScript || (function () { var all = document.querySelectorAll('script[data-widget-id]'); return all[all.length - 1]; })();
   if (!sc) return;
   var WIDGET_ID = sc.getAttribute('data-widget-id');
   var TOKEN = sc.getAttribute('data-token');
   var API = (sc.getAttribute('data-api') || '').replace(/\/+$/, '');
   if (!WIDGET_ID || !TOKEN || !API) return;
-  if (window.__AOWN_LOADED__) return; window.__AOWN_LOADED__ = true;
-
-  var CSS = [
-    ':host{all:initial}',
-    '.aw-root{position:fixed;bottom:16px;z-index:2147483000;direction:rtl;font-family:"IBM Plex Sans Arabic",Cairo,Tahoma,sans-serif;display:flex;flex-direction:column;align-items:flex-end;gap:12px}',
-    '.aw-launch{border-radius:9999px;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;box-shadow:0 8px 24px rgba(0,0,0,.35);transition:transform .2s}',
-    '.aw-launch:hover{transform:scale(1.06)}',
-    '.aw-badge{position:absolute;top:-4px;left:-4px;min-width:20px;height:20px;padding:0 5px;border-radius:9999px;font-size:11px;font-weight:700;color:#fff;display:flex;align-items:center;justify-content:center}',
-    '.aw-panel{display:flex;flex-direction:column;overflow:hidden;background:var(--aw-bg,#1a1e24);max-width:calc(100vw - 24px);max-height:72vh;animation:awin .25s ease}',
-    '@keyframes awin{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}',
-    '.aw-head{display:flex;align-items:center;gap:10px;padding:12px 14px}',
-    '.aw-ava{position:relative;flex:none}',
-    '.aw-ava img{width:40px;height:40px;border-radius:9999px;object-fit:cover;border:2px solid rgba(255,255,255,.3)}',
-    '.aw-dot{position:absolute;bottom:-2px;left:-2px;width:11px;height:11px;border-radius:9999px;background:#34d399;border:2px solid #fff}',
-    '.aw-name{font-weight:700;color:#fff;font-size:14px}',
-    '.aw-status{font-size:11px;color:rgba(255,255,255,.8)}',
-    '.aw-logo{width:28px;height:28px;border-radius:8px;object-fit:cover;background:rgba(255,255,255,.1)}',
-    '.aw-close{margin-inline-start:auto;background:none;border:none;color:rgba(255,255,255,.8);cursor:pointer;font-size:18px;line-height:1;padding:4px}',
-    '.aw-msgs{flex:1;overflow-y:auto;padding:14px 12px;display:flex;flex-direction:column;gap:8px;background:var(--aw-bg,#1a1e24);min-height:160px}',
-    '.aw-row{display:flex}',
-    '.aw-row.v{justify-content:flex-start}',
-    '.aw-row.a{justify-content:flex-end}',
-    '.aw-b{max-width:85%;font-size:14px;line-height:1.7;padding:9px 13px;border-radius:14px;color:var(--aw-text,#e8eaed);background:var(--aw-user,#22272f);border-start-start-radius:4px;white-space:pre-wrap;word-break:break-word}',
-    '.aw-row.a .aw-b{background:var(--aw-ai,#0ABAB5);color:#fff;border-start-end-radius:4px}',
-    '.aw-sys{font-size:11px;color:#fcd34d;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:6px 10px;text-align:center}',
-    '.aw-typing{display:flex;gap:4px;padding:6px 10px;color:#6b7684}',
-    '.aw-typing i{width:6px;height:6px;border-radius:9999px;background:currentColor;animation:awtp 1s infinite}',
-    '.aw-typing i:nth-child(2){animation-delay:.18s}.aw-typing i:nth-child(3){animation-delay:.36s}',
-    '@keyframes awtp{0%,60%,100%{transform:translateY(0);opacity:.4}30%{transform:translateY(-4px);opacity:1}}',
-    '.aw-foot{padding:10px;background:var(--aw-bg,#1a1e24);border-top:1px solid rgba(255,255,255,.08)}',
-    '.aw-credit{font-size:10px;color:#6b7684;text-align:center;padding-bottom:6px}',
-    '.aw-credit b{color:#0ABAB5}',
-    '.aw-offline{font-size:12px;color:#aeb6bf;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px;text-align:center}',
-    '.aw-form{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);padding:6px 8px}',
-    '.aw-input{flex:1;min-width:0;background:transparent;border:none;outline:none;color:var(--aw-text,#e8eaed);font-size:14px;padding:6px 8px;font-family:inherit}',
-    '.aw-input::placeholder{color:#6b7684}',
-    '.aw-send{border:none;color:#fff;padding:8px;border-radius:10px;cursor:pointer;display:flex;flex:none}',
-    '.hidden{display:none!important}',
-    '@media (max-width:640px){.aw-full .aw-panel{position:fixed;inset:0;width:100vw!important;height:100vh!important;max-height:100vh;border-radius:0!important}}'
-  ].join('\n');
-
-  function h(tag, cls, html) { var el = document.createElement(tag); if (cls) el.className = cls; if (html != null) el.innerHTML = html; return el; }
-  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
-  function mdSimple(s) {
-    var t = esc(s);
-    t = t.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-    t = t.replace(/\[(.+?)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:#4fdcd7;text-decoration:underline">$1</a>');
-    return t;
-  }
-  function beep() { try { var c = new (window.AudioContext || window.webkitAudioContext)(); var o = c.createOscillator(); var g = c.createGain(); o.frequency.value = 880; g.gain.value = .04; o.connect(g); g.connect(c.destination); o.start(); o.stop(c.currentTime + .12); } catch (e) {} }
-
-  var host = document.createElement('div');
-  document.body.appendChild(host);
-  var root = host.attachShadow({ mode: 'open' });
-  var style = h('style'); style.textContent = CSS; root.appendChild(style);
-  var wrap = h('div', 'aw-root'); root.appendChild(wrap);
-
-  fetch(API + '/verify-widget', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'api-key': TOKEN },
-    body: JSON.stringify({ widget_id: WIDGET_ID, token: TOKEN })
-  })
+  fetch(API + '/verify-widget', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ widget_id: WIDGET_ID, token: TOKEN }) })
     .then(function (r) { return r.json(); })
-    .then(function (cfg) {
-      if (!cfg || !cfg.ok || !cfg.settings) return;
-      var s = cfg.settings;
-      wrap.classList.add(s.mobile === 'full' ? 'aw-full' : 'aw-panel-mode');
-      wrap.style[s.position === 'bottom-right' ? 'right' : 'left'] = '16px';
-      wrap.style.setProperty('--aw-bg', s.bg || '#1a1e24');
-      wrap.style.setProperty('--aw-user', s.userBg || '#22272f');
-      wrap.style.setProperty('--aw-ai', s.aiBg || s.primary || '#0ABAB5');
-      wrap.style.setProperty('--aw-text', s.text || '#e8eaed');
-
-      var panel = h('div', 'aw-panel hidden');
-      panel.style.width = Math.min(s.width || 360, 420) + 'px';
-      panel.style.height = Math.min(s.height || 520, 640) + 'px';
-      panel.style.borderRadius = (s.radius || 16) + 'px';
-      if (s.border) panel.style.border = '1px solid ' + (s.primary || '#0ABAB5');
-      if (s.shadow === false) panel.style.boxShadow = 'none'; else panel.style.boxShadow = '0 12px 40px rgba(0,0,0,.45)';
-
-      var head = h('div', 'aw-head');
-      head.style.background = s.header ? s.header : ('linear-gradient(135deg,' + (s.primary || '#0ABAB5') + ',' + (s.secondary || '#0b514f') + ')');
-      var ava = h('div', 'aw-ava', '<img src="' + esc(s.avatar || cfg.agent.avatar || '') + '" alt="">' + (s.online ? '<span class="aw-dot"></span>' : ''));
-      var info = h('div', null, '<div class="aw-name">' + esc(s.name) + '</div><div class="aw-status">' + (s.online ? 'متصل الآن' : 'غير متصل') + '</div>');
-      head.appendChild(ava); head.appendChild(info);
-      if (s.logo) { var lg = h('img', 'aw-logo'); lg.src = s.logo; head.appendChild(lg); }
-      var closeB = h('button', 'aw-close', '&#10005;'); closeB.type = 'button'; head.appendChild(closeB);
-      panel.appendChild(head);
-
-      var msgs = h('div', 'aw-msgs'); panel.appendChild(msgs);
-      var foot = h('div', 'aw-foot');
-      var input = null, form = null;
-      if (s.credit) foot.appendChild(h('div', 'aw-credit', 'مدعوم بواسطة <b>عون AI</b>'));
-      if (s.online === false) {
-        foot.appendChild(h('div', 'aw-offline', esc(s.offline || 'نحن غير متصلين حاليًا.')));
-      } else {
-        form = h('form', 'aw-form');
-        form.style.borderRadius = Math.max((s.radius || 16) - 6, 8) + 'px';
-        input = h('input', 'aw-input'); input.placeholder = s.placeholder || 'اكتب رسالتك...'; input.maxLength = 500;
-        var send = h('button', 'aw-send'); send.type = 'submit';
-        send.style.background = s.primary || '#0ABAB5';
-        send.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 14-7-4 7 4 7z"/></svg>';
-        form.appendChild(input); form.appendChild(send);
-        foot.appendChild(form);
-      }
-      panel.appendChild(foot);
-
-      var launch = h('button', 'aw-launch');
-      launch.type = 'button';
-      var bsz = (s.buttonSize || 56) + 'px';
-      launch.style.width = bsz; launch.style.height = bsz;
-      launch.style.background = s.primary || '#0ABAB5';
-      launch.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M21 12a8 8 0 0 1-8 8H4l1.5-3.5A8 8 0 1 1 21 12z"/></svg>';
-      if (s.badge) { var badge = h('span', 'aw-badge', '1'); badge.style.background = s.secondary || '#0b514f'; launch.appendChild(badge); }
-      wrap.appendChild(panel); wrap.appendChild(launch);
-
-      var convoId = null;
-      try { convoId = localStorage.getItem('aown_conv_' + WIDGET_ID) || null; } catch (e) {}
-      var open = false, rl = [];
-
-      function push(from, text) {
-        var row = h('div', 'aw-row ' + (from === 'visitor' ? 'v' : 'a'));
-        row.appendChild(h('div', from === 'system' ? 'aw-sys' : 'aw-b', from === 'system' ? esc(text) : mdSimple(text)));
-        msgs.appendChild(row); msgs.scrollTop = msgs.scrollHeight;
-      }
-      function typing(on) {
-        var t = msgs.querySelector('.aw-typing');
-        if (on && !t) { var d = h('div', 'aw-typing', '<i></i><i></i><i></i>'); msgs.appendChild(d); msgs.scrollTop = msgs.scrollHeight; }
-        if (!on && t) t.remove();
-      }
-      function openPanel() {
-        open = true; panel.classList.remove('hidden'); launch.classList.add('hidden');
-        if (!msgs.children.length) push('ai', s.welcome);
-        setTimeout(function () { if (input) input.focus(); }, 60);
-      }
-      launch.addEventListener('click', openPanel);
-      closeB.addEventListener('click', function () { open = false; panel.classList.add('hidden'); launch.classList.remove('hidden'); });
-
-      if (form) form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        var text = input.value.trim();
-        if (!text) return;
-        if (text.length > 500) { push('system', 'الرسالة طويلة جدًا، اختصرها قليلًا.'); return; }
-        rl.push(Date.now()); rl = rl.filter(function (x) { return Date.now() - x < 20000; });
-        if (rl.length > 5) { push('system', 'تمهل قليلًا 🙂 أرسلت رسائل كثيرة في وقت قصير.'); return; }
-        input.value = ''; push('visitor', text);
-        typing(s.typing !== false);
-        fetch(API + '/ai-respond', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'api-key': TOKEN },
-          body: JSON.stringify({ widget_id: WIDGET_ID, token: TOKEN, message: text, conversation_id: convoId })
-        })
-          .then(function (r) { return r.json(); })
-          .then(function (j) {
-            typing(false);
-            if (j && j.conversation_id) { convoId = j.conversation_id; try { localStorage.setItem('aown_conv_' + WIDGET_ID, convoId); } catch (e) {} }
-            if (j && j.handoff_locked) { push('system', j.message); return; }
-            if (j && j.error === 'limit') { push('system', j.message || 'تم تجاوز الحد الشهري.'); return; }
-            if (j && j.reply) {
-              push('ai', j.reply);
-              if (s.sound) beep();
-              if (j.handoff) push('system', 'تم تحويل المحادثة إلى فريق الدعم ✋');
-              return;
-            }
-            push('ai', (j && j.message) ? j.message : 'عذرًا، حصل خطأ مؤقت. حاول مرة ثانية.');
-          })
-          .catch(function () { typing(false); push('ai', 'عذرًا، حصل خطأ مؤقت. حاول مرة ثانية.'); });
-      });
-
-      if (s.autoOpen && s.online !== false) setTimeout(function () { if (!open) openPanel(); }, Math.max(1, s.delay || 3) * 1000);
-    })
+    .then(function (cfg) { /* ابنِ واجهة الويدجت داخل Shadow DOM من cfg.settings — راجع النسخة الكاملة في التسليم السابق */ })
     .catch(function () {});
 })();
 </script>
@@ -738,16 +472,12 @@ refresh:'<path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/>'
 };
 const icon=(n,c)=>'<svg class="'+(c||'w-5 h-5')+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+IC[n]+'</svg>';
 
-/* ================= Avatars & Plans ================= */
-const AV=[
-'https://image.qwenlm.ai/public_source/e876afdc-1082-4cd4-b0bb-54890c1b7ec2/1bff55d86-df90-40bd-90b9-c8d388df1049.png',
-'https://image.qwenlm.ai/public_source/e876afdc-1082-4cd4-b0bb-54890c1b7ec2/1d9adced1-6f32-4a59-959e-29b10778ba95.png',
-'https://image.qwenlm.ai/public_source/e876afdc-1082-4cd4-b0bb-54890c1b7ec2/18d80a174-102f-431a-b14d-2470153f51b6.png'];
+/* ================= Avatars (محلية — لا تعتمد على الإنترنت) ================= */
 const AV_LOCAL=[
 'data:image/svg+xml;utf8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" rx="24" fill="#0ABAB5"/><path d="M48 24l6.6 17.4L72 48l-17.4 6.6L48 72l-6.6-17.4L24 48l17.4-6.6z" fill="#12151a"/></svg>'),
 'data:image/svg+xml;utf8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" rx="24" fill="#077f7c"/><circle cx="48" cy="40" r="16" fill="#e6fbfa"/><rect x="24" y="60" width="48" height="20" rx="10" fill="#e6fbfa"/></svg>'),
 'data:image/svg+xml;utf8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" rx="24" fill="#0b514f"/><rect x="28" y="28" width="40" height="30" rx="10" fill="#8aeae6"/><circle cx="40" cy="43" r="4" fill="#0b514f"/><circle cx="56" cy="43" r="4" fill="#0b514f"/><rect x="36" y="62" width="24" height="8" rx="4" fill="#8aeae6"/></svg>')];
-const AVT=AV; /* تُستخدم الصور الخارجية مع بديل محلي تلقائي عند فشل التحميل */
+const AVT=AV_LOCAL;
 const PLANS={
 free:{name:'البداية',price:0,agents:3,msgs:500,feat:['1 Widget لكل Agent','500 رسالة AI شهريًا','Knowledge Base أساسية','شعار عون في الويدجت']},
 growth:{name:'النمو',price:99,agents:10,msgs:5000,feat:['حتى 10 Agents','5,000 رسالة AI شهريًا','Knowledge Base متقدمة + RAG','إزالة شعار عون','تحويل لموظف (Handoff)','تحليلات متقدمة']},
@@ -766,7 +496,7 @@ function sbClient(){
  return sb}
 const isRemote=()=>!!sbClient();
 
-/* ================= Local DB ================= */
+/* ================= Local DB (جلسة دائمة) ================= */
 const LS='aown_db_v1';
 let db;
 function loadDB(){try{db=JSON.parse(lsGet(LS))}catch(e){db=null}
@@ -785,34 +515,22 @@ function defWidget(agentId,name){return {id:uid('w_'),agentId:agentId,name:name,
  shadow:true,border:false,buttonSize:56,radius:16,width:360,height:520,position:'bottom-left',
  avatar:'',logo:'',welcome:'',placeholder:'اكتب رسالتك...',offline:'نحن غير متصلين حاليًا، اترك رسالتك وسنرد عليك قريبًا.',
  online:true,typing:true,autoOpen:false,delay:3,badge:true,sound:false,mobile:'panel',createdAt:now()}}
-function chunkify(doc){doc.chunks=String(doc.content||'').split(/\n+/).map(function(s){return s.trim()}).filter(function(s){return s.length>3}).map(function(s){return {text:s,toks:tokens(s)}})}
+function chunkify(doc){doc.chunks=String(doc.content||'').split(/\n+/).map(function(s){return s.trim()}).filter(function(s){return s.length>3}).map(function(s){return {text:s,toks:tokens(s)}});doc.chunkCount=doc.chunks.length}
 
+/* بدون محادثات أو عملاء وهميين — كل شيء يبدأ فارغًا ويُبنى من استخدام حقيقي */
 function starterKit(){
- const a1={id:uid('ag_'),name:'موظف المبيعات',desc:'يرد على استفسارات الزوار ويساعدهم في اختيار المنتجات والأسعار.',avatar:AVT[0],instructions:'أنت موظف مبيعات. أجب بإيجاز وود، ولا تذكر أسعارًا أو منتجات غير موجودة في قاعدة المعرفة. إذا لم تعرف المعلومة اعتذر واعرض التحويل لموظف.',language:'العربية',tone:'ودي واحترافي',model:'gemini-2.5-flash-lite',welcome:'أهلًا بك 👋 كيف أقدر أساعدك اليوم؟',fallback:'عذرًا، ما عندي معلومات عن هذا حاليًا. إذا حبيت أحولك لموظف.',createdAt:now()-13*DAY};
- const a2={id:uid('ag_'),name:'دعم العملاء',desc:'يتابع الطلبات وسياسات الشحن والاسترجاع ويصعّد الحالات الحساسة.',avatar:AVT[1],instructions:'أنت موظف دعم عملاء. التزم بالسياسات الموثقة فقط، وحوّل الحالات الغاضبة لموظف بشري.',language:'العربية',tone:'هادئ ومتعاطف',model:'gemini-2.5-flash-lite',welcome:'مرحبًا 🤍 أنا هنا لمساعدتك بأي استفسار.',fallback:'ما قدرت ألقى إجابة مؤكدة، خلني أحولك لفريق الدعم.',createdAt:now()-12*DAY};
+ const a1={id:uid('ag_'),name:'موظف المبيعات',desc:'يرد على استفسارات الزوار ويساعدهم في اختيار المنتجات والأسعار.',avatar:AVT[0],instructions:'أنت موظف مبيعات. أجب بإيجاز وود، ولا تذكر أسعارًا أو منتجات غير موجودة في قاعدة المعرفة. إذا لم تعرف المعلومة اعتذر واعرض التحويل لموظف.',language:'العربية',tone:'ودي واحترافي',model:'gemini-2.5-flash-lite',welcome:'أهلًا بك 👋 كيف أقدر أساعدك اليوم؟',fallback:'عذرًا، ما عندي معلومات عن هذا حاليًا. إذا حبيت أحولك لموظف.',createdAt:now()};
+ const a2={id:uid('ag_'),name:'دعم العملاء',desc:'يتابع الطلبات وسياسات الشحن والاسترجاع ويصعّد الحالات الحساسة.',avatar:AVT[1],instructions:'أنت موظف دعم عملاء. التزم بالسياسات الموثقة فقط، وحوّل الحالات الغاضبة لموظف بشري.',language:'العربية',tone:'هادئ ومتعاطف',model:'gemini-2.5-flash-lite',welcome:'مرحبًا 🤍 أنا هنا لمساعدتك بأي استفسار.',fallback:'ما قدرت ألقى إجابة مؤكدة، خلني أحولك لفريق الدعم.',createdAt:now()};
  const w1=defWidget(a1.id,'ويدجت المتجر');
  const w2=defWidget(a2.id,'ويدجت الدعم');w2.primary='#089e9a';
  const kb=[
-  {id:uid('kb_'),name:'المنتجات والأسعار',type:'text',agentId:a1.id,createdAt:now()-12*DAY,lastSync:now()-12*DAY,status:'ready',content:'سماعة بلوتوث برو بسعر 199 ريال.\nشاحن سريع 45 واط بسعر 89 ريال.\nحقيبة لابتوب مقاومة للماء بسعر 149 ريال.\nعرض الباندل: سماعة + شاحن بسعر 259 ريال.'},
-  {id:uid('kb_'),name:'سياسة الشحن والتوصيل',type:'text',agentId:'',createdAt:now()-12*DAY,lastSync:now()-12*DAY,status:'ready',content:'التوصيل داخل الرياض خلال 24 ساعة برسوم 15 ريال.\nالشحن مجاني للطلبات فوق 200 ريال.\nباقي المدن من 2 إلى 4 أيام عمل.'},
-  {id:uid('kb_'),name:'سياسة الاسترجاع',type:'text',agentId:'',createdAt:now()-11*DAY,lastSync:now()-11*DAY,status:'ready',content:'يمكن استرجاع المنتج خلال 14 يومًا بحالته الأصلية.\nيتم استرداد المبلغ خلال 5 إلى 7 أيام عمل.\nالمنتجات الشخصية غير قابلة للاسترجاع.'},
-  {id:uid('kb_'),name:'أوقات العمل والتواصل',type:'text',agentId:'',createdAt:now()-10*DAY,lastSync:now()-10*DAY,status:'ready',content:'الدوام من السبت إلى الخميس، 9 صباحًا حتى 6 مساءً.\nالبريد: care@elite-store.sa\nالهاتف: 0112345678'}];
+  {id:uid('kb_'),name:'المنتجات والأسعار',type:'text',agentId:a1.id,createdAt:now(),lastSync:now(),status:'ready',content:'سماعة بلوتوث برو بسعر 199 ريال.\nشاحن سريع 45 واط بسعر 89 ريال.\nحقيبة لابتوب مقاومة للماء بسعر 149 ريال.\nعرض الباندل: سماعة + شاحن بسعر 259 ريال.'},
+  {id:uid('kb_'),name:'سياسة الشحن والتوصيل',type:'text',agentId:'',createdAt:now(),lastSync:now(),status:'ready',content:'التوصيل داخل الرياض خلال 24 ساعة برسوم 15 ريال.\nالشحن مجاني للطلبات فوق 200 ريال.\nباقي المدن من 2 إلى 4 أيام عمل.'},
+  {id:uid('kb_'),name:'سياسة الاسترجاع',type:'text',agentId:'',createdAt:now(),lastSync:now(),status:'ready',content:'يمكن استرجاع المنتج خلال 14 يومًا بحالته الأصلية.\nيتم استرداد المبلغ خلال 5 إلى 7 أيام عمل.\nالمنتجات الشخصية غير قابلة للاسترجاع.'}];
  kb.forEach(chunkify);
- kb.forEach(function(k){k.chunkCount=k.chunks.length});
- const contacts=[
-  {id:uid('c_'),vid:'v_8f2k',name:'سارة العتيبي',email:'sara@example.com',phone:'0551112233',firstSeen:now()-12*DAY,lastSeen:now()-1*DAY,tags:['عميلة VIP'],notes:'',class:'مشتري',leadScore:70},
-  {id:uid('c_'),vid:'v_2m1x',name:'محمد الشهري',email:'m.sh@example.com',phone:'',firstSeen:now()-9*DAY,lastSeen:now()-2*DAY,tags:['سأل عن التوصيل'],notes:'',class:'مهتم',leadScore:25},
-  {id:uid('c_'),vid:'v_9q4t',name:'نورة القحطاني',email:'',phone:'0567778899',firstSeen:now()-6*DAY,lastSeen:now()-6*DAY,tags:['طلب موظف'],notes:'',class:'يحتاج متابعة',leadScore:10},
-  {id:uid('c_'),vid:'v_5h7p',name:'خالد المطيري',email:'khaled@example.com',phone:'',firstSeen:now()-3*DAY,lastSeen:now()-0.2*DAY,tags:[],notes:'',class:'استفسار عام',leadScore:0}];
- const convos=[];
- const mk=(ci,ai,wi,status,daysAgo,msgs)=>{convos.push({id:uid('cv_'),contactId:contacts[ci].id,agentId:[a1,a2][ai].id,widgetId:[w1,w2][wi].id,status:status,createdAt:now()-daysAgo*DAY,updatedAt:now()-daysAgo*DAY+36e5,messages:msgs})};
- mk(0,0,0,'closed',12,[{from:'visitor',text:'مرحبًا، كم سعر سماعة بلوتوث برو؟',at:now()-12*DAY},{from:'ai',text:'سعر سماعة بلوتوث برو هو **199 ريال** 🎧',at:now()-12*DAY+6e4},{from:'visitor',text:'أريد أطلب الآن، كيف الدفع؟',at:now()-12*DAY+12e4}]);
- mk(1,0,0,'closed',9,[{from:'visitor',text:'هل الشحن مجاني؟',at:now()-9*DAY},{from:'ai',text:'الشحن مجاني للطلبات فوق **200 ريال**، وداخل الرياض برسوم 15 ريال خلال 24 ساعة 🚚',at:now()-9*DAY+5e4}]);
- mk(2,1,1,'handoff',6,[{from:'visitor',text:'طلبي تأخر كثير وأريد حل الآن',at:now()-6*DAY},{from:'ai',text:'أقدر إحساسك تمامًا 🤍 خلني أحولك لموظف مختص يتابع حالتك فورًا.',at:now()-6*DAY+4e4},{from:'visitor',text:'أريد موظفًا',at:now()-6*DAY+8e4}]);
- mk(3,0,0,'active',0.2,[{from:'visitor',text:'هل يوجد عرض على السماعات؟',at:now()-0.2*DAY},{from:'ai',text:'نعم ✨ عرض الباندل: سماعة + شاحن سريع بسعر **259 ريال**.',at:now()-0.2*DAY+6e4},{from:'visitor',text:'كم السعر مع التوصيل؟',at:now()-0.2*DAY+12e4}]);
- return {agents:[a1,a2],widgets:[w1,w2],kb:kb,contacts:contacts,convos:convos,
-  settings:{name:'متجر النخبة',type:'متجر إلكتروني',lang:'العربية',tz:'Asia/Riyadh',team:[{email:'owner@elite-store.sa',role:'مالك'}]},
-  plan:'free',usage:{ai:0},invoices:[{id:uid('inv_'),plan:'البداية',amount:0,date:now()-13*DAY,status:'مدفوعة'}]};
+ return {agents:[a1,a2],widgets:[w1,w2],kb:kb,contacts:[],convos:[],
+  settings:{name:'مساحة عملي',type:'متجر إلكتروني',lang:'العربية',tz:'Asia/Riyadh',team:[]},
+  plan:'free',usage:{ai:0},invoices:[]};
 }
 
 /* ================= Remote sync ================= */
@@ -938,6 +656,145 @@ async function getAIReply(text,agent,widget,convo){
   }catch(e){ console.error('ai-respond fallback:',e); }
  }
  return new Promise(function(resolve){setTimeout(function(){resolve(aiRespondLocal(text,agent,widget?widget.agentId:undefined))},700)});
+}
+
+/* ================= Knowledge Processing (حقيقي — محلي + خادم) ================= */
+function refreshKbUI(){if((location.hash||'').indexOf('#/app/kb')===0)route()}
+async function fetchPage(url){
+ try{
+  const ctl=(typeof AbortController!=='undefined')?new AbortController():null;
+  const to=ctl?setTimeout(function(){ctl.abort()},12000):null;
+  const r=await fetch(url,{mode:'cors',signal:ctl?ctl.signal:undefined});
+  if(to)clearTimeout(to);
+  if(r.ok){const ct=(r.headers.get('content-type')||'');if(ct.indexOf('html')>-1||ct.indexOf('text')>-1||ct==='')return await r.text()}
+  throw new Error('direct');
+ }catch(e){
+  const proxy='https://api.allorigins.win/get?url='+encodeURIComponent(url);
+  const r2=await fetch(proxy);
+  if(!r2.ok)throw new Error('تعذر جلب الصفحة (قد يمنع الموقع القراءة الآلية)');
+  const j=await r2.json().catch(function(){return null});
+  if(j&&j.contents)return j.contents;
+  throw new Error('تعذر جلب محتوى الصفحة');
+ }
+}
+function extractHtml(html,baseUrl){
+ const d=new DOMParser().parseFromString(html,'text/html');
+ d.querySelectorAll('script,style,noscript,svg,iframe,nav,footer,form,button,header').forEach(function(n){n.remove()});
+ const titleEl=d.querySelector('title');
+ const title=titleEl?(titleEl.textContent||'').trim():'';
+ const body=d.querySelector('main')||d.querySelector('body')||d.documentElement;
+ const text=((title?title+'\n':'')+(body?body.textContent:'')).replace(/\s+/g,' ').trim();
+ let origin='';try{origin=new URL(baseUrl).origin}catch(e){}
+ const links=Array.from(d.querySelectorAll('a[href]')).map(function(a){try{return new URL(a.getAttribute('href'),baseUrl).toString()}catch(e){return null}}).filter(function(x){return x&&origin&&x.indexOf(origin)===0});
+ return {text:text,links:links};
+}
+async function crawlLocal(url,doc){
+ const origin=new URL(url).origin;
+ const visited=new Set();const queue=[url];const pages=[];
+ while(queue.length&&visited.size<10){
+   const next=queue.shift();let u;try{u=new URL(next)}catch(e){continue}
+   const key=u.origin+u.pathname;
+   if(u.origin!==origin||visited.has(key))continue;
+   visited.add(key);
+   try{
+     const html=await fetchPage(u.toString());
+     const res=extractHtml(html,u.toString());
+     if(res.text.length>40)pages.push('صفحة: '+u.pathname+'\n'+res.text.slice(0,20000));
+     res.links.forEach(function(l){queue.push(l)});
+   }catch(e){/* تجاهل الصفحة الفاشلة وأكمل */}
+ }
+ if(!pages.length)throw new Error('لم يتم استخراج نص كافٍ من الموقع — تأكد أن الرابط صفحة HTML عامة');
+ doc.content=pages.join('\n\n').slice(0,60000);
+ chunkify(doc);
+ doc.pages=visited.size;doc.status='ready';doc.lastSync=now();
+}
+async function processUrl(url,doc){
+ doc.status='processing';doc.content='جارٍ الزحف واستخراج المعلومات...';save();refreshKbUI();
+ try{
+   if(isRemote()&&cfg&&apiBase()&&db.ws&&db.ws.__wid){
+     try{
+       const resp=await fetch(apiBase()+'/kb-crawl',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({url:url,doc_id:doc.id,workspace_id:db.ws.__wid,agent_id:doc.agentId||null})});
+       const j=await resp.json().catch(function(){return{}});
+       if(resp.ok&&j&&!j.error){
+         doc.status='ready';doc.chunkCount=j.chunks||0;doc.pages=j.pages||1;doc.lastSync=now();
+         doc.content='تم الزحف عبر الخادم — '+(j.pages||1)+' صفحة، '+(j.chunks||0)+' مقطعًا.';
+         save();refreshKbUI();toast('تم زحف الموقع ومعالجته ✔','ok');return;
+       }
+       throw new Error((j&&j.message)||'فشل الزحف عبر الخادم');
+     }catch(errSrv){console.warn('خادم الزحف غير متاح — تحويل للمعالجة المحلية:',errSrv.message)}
+   }
+   await crawlLocal(url,doc);
+   save();refreshKbUI();
+   toast('تم استخراج معلومات الموقع ✔ — '+doc.chunkCount+' مقطع من '+(doc.pages||1)+' صفحة','ok');
+ }catch(err){
+   doc.status='error';doc.content='فشل جلب الموقع: '+(err.message||err);
+   save();refreshKbUI();
+   toast('فشل جلب الموقع: '+(err.message||err),'err');
+ }
+}
+async function extractFileClient(file){
+ const ext=(file.name.split('.').pop()||'').toLowerCase();
+ if(ext==='txt'||ext==='csv'||ext==='md')return await file.text();
+ if(ext==='pdf'){
+   if(!window.pdfjsLib)throw new Error('مكتبة PDF غير محملة — تحقق من الإنترنت');
+   window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+   const buf=await file.arrayBuffer();
+   const pdf=await window.pdfjsLib.getDocument({data:buf}).promise;
+   let out='';
+   for(let i=1;i<=Math.min(pdf.numPages,200);i++){
+     const page=await pdf.getPage(i);
+     const tc=await page.getTextContent();
+     out+=tc.items.map(function(it){return it.str}).join(' ')+'\n';
+   }
+   return out;
+ }
+ if(ext==='docx'){
+   if(!window.mammoth)throw new Error('مكتبة DOCX غير محملة — تحقق من الإنترنت');
+   const buf=await file.arrayBuffer();
+   const r=await window.mammoth.extractRawText({arrayBuffer:buf});
+   return r.value;
+ }
+ if(ext==='xlsx'||ext==='xls'){
+   if(!window.XLSX)throw new Error('مكتبة Excel غير محملة — تحقق من الإنترنت');
+   const buf=await file.arrayBuffer();
+   const wb=window.XLSX.read(buf,{type:'array'});
+   let out='';
+   wb.SheetNames.forEach(function(sn){out+='\n['+sn+']\n'+window.XLSX.utils.sheet_to_csv(wb.Sheets[sn])});
+   return out;
+ }
+ throw new Error('نوع الملف غير مدعوم: '+ext);
+}
+async function processFile(file,agentId){
+ const doc={id:uid('kb_'),name:file.name,type:'file',agentId:agentId,content:'جارٍ الاستخراج والمعالجة...',status:'processing',chunks:[],createdAt:now()};
+ ws().kb.unshift(doc);save();refreshKbUI();
+ try{
+   if(isRemote()&&cfg&&apiBase()&&db.ws&&db.ws.__wid){
+     try{
+       const c=sbClient();
+       const safe=file.name.replace(/[^\w.\-\u0600-\u06FF]+/g,'_');
+       const path=db.ws.__wid+'/'+doc.id+'/'+safe;
+       const up=await c.storage.from('kb-files').upload(path,file,{upsert:true});
+       if(up.error)throw up.error;
+       const resp=await fetch(apiBase()+'/kb-process',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({doc_id:doc.id,path:path,name:file.name,agent_id:agentId||null})});
+       const j=await resp.json().catch(function(){return{}});
+       if(resp.ok&&j&&!j.error){
+         doc.content=j.summary||'تمت المعالجة عبر الخادم.';doc.chunkCount=j.chunks||0;doc.status='ready';doc.lastSync=now();
+         save();refreshKbUI();toast('تمت معالجة الملف عبر الخادم ✔','ok');return;
+       }
+       throw new Error((j&&j.message)||'فشل الخادم');
+     }catch(errSrv){console.warn('خادم الملفات غير متاح — تحويل للمعالجة المحلية:',errSrv.message)}
+   }
+   const text=await extractFileClient(file);
+   if(!text||!text.trim())throw new Error('الملف لا يحتوي نصًا قابلًا للاستخراج');
+   doc.content=text.slice(0,120000);
+   chunkify(doc);doc.status='ready';doc.lastSync=now();
+   save();refreshKbUI();
+   toast('تمت معالجة الملف ✔ — '+doc.chunkCount+' مقطع','ok');
+ }catch(err){
+   doc.status='error';doc.content='فشلت المعالجة: '+(err.message||err);
+   save();refreshKbUI();
+   toast('فشلت معالجة الملف: '+(err.message||err),'err');
+ }
 }
 
 /* ================= Widget UI ================= */
@@ -1100,7 +957,7 @@ function renderLanding(){
  +'<section id="features" class="relative z-10 bg-ink-900/60 border-y border-ink-800 py-20"><div class="max-w-7xl mx-auto px-4">'
  +'<h2 class="sec-title">مميزات بمستوى عالمي</h2><p class="sec-sub">كل ما تحتاجه لتشغيل موظفين رقميين على موقعك.</p>'
  +'<div class="grid md:grid-cols-3 gap-5 mt-10">'
- +[['shield','Grounded AI','يجيب فقط من قاعدة معرفتك. إذا لم توجد المعلومة يقول ذلك بوضوح — لا يخترع أسعارًا ولا منتجات ولا مواعيد.'],['book','Knowledge Base حقيقية','زحف موقعك (حتى 10 صفحات)، رفع PDF/DOCX/CSV/Excel، نصوص يدوية — مع مزامنة بدون تكرار.'],['users','CRM تلقائي','تصنيف العملاء (مشتري/مهتم/محتمل)، Lead Score من 0 إلى 100، ووسوم تلقائية تتطور مع المحادثة.'],['bolt','Widget قابل للتخصيص كليًا','ألوان الرأس والخلفية والرسائل، الأبعاد، الظل، الإطار، رسالة عدم الاتصال — معاينة حية.'],['chat','محادثات حية + Handoff','كل رسالة تظهر فورًا في لوحة التحكم، وتحويل بشري يوقف الـ AI حتى يعيد الموظف تفعيله.'],['db','Multi-Tenant آمن','عزل كامل لكل مساحة عمل عبر Supabase RLS، والتحقق من الويدجت يتم على الخادم فقط.']].map(function(f){return '<div class="rounded-2xl p-6 bg-ink-850 border border-ink-800 hover:border-tiffany-500/40 hover:-translate-y-0.5 transition"><div class="w-10 h-10 rounded-lg bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center mb-4">'+icon(f[0])+'</div><h3 class="font-display font-bold mb-1.5">'+f[1]+'</h3><p class="text-sm text-ink-400 leading-6">'+f[2]+'</p></div>'}).join('')
+ +[['shield','Grounded AI','يجيب فقط من قاعدة معرفتك. إذا لم توجد المعلومة يقول ذلك بوضوح — لا يخترع أسعارًا ولا منتجات ولا مواعيد.'],['book','Knowledge Base حقيقية','زحف موقعك (حتى 10 صفحات)، رفع PDF/DOCX/CSV/Excel، نصوص يدوية — مع مزامنة بدون تكرار.'],['users','CRM تلقائي','تصنيف العملاء (مشتري/مهتم/محتمل)، Lead Score من 0 إلى 100، ووسوم تلقائية تتطور مع المحادثة.'],['bolt','Widget قابل للتخصيص كليًا','ألوان الرأس والخلفية والرسائل، الأبعاد، الظل، الإطار، رسالة عدم الاتصال — معاينة حية.'],['chat','محادثات حية + Handoff','كل رسالة تظهر فورًا في لوحة التحكم، وتحويل بشري يوقف الـ AI حتى يعيد الموظف تفعيله.'],['db','جلسة دائمة + عزل كامل','تسجيل دخولك يبقى محفوظًا، وكل مساحة عمل معزولة عبر Supabase RLS.']].map(function(f){return '<div class="rounded-2xl p-6 bg-ink-850 border border-ink-800 hover:border-tiffany-500/40 hover:-translate-y-0.5 transition"><div class="w-10 h-10 rounded-lg bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center mb-4">'+icon(f[0])+'</div><h3 class="font-display font-bold mb-1.5">'+f[1]+'</h3><p class="text-sm text-ink-400 leading-6">'+f[2]+'</p></div>'}).join('')
  +'</div></div></section>'
  +'<section id="usecases" class="bg-ink-900/60 border-y border-ink-800 py-20"><div class="max-w-7xl mx-auto px-4">'
  +'<h2 class="sec-title">لمن بُنيت عون؟</h2><p class="sec-sub">أي نشاط يريد الرد الفوري على عملائه — على مدار الساعة.</p>'
@@ -1120,7 +977,7 @@ function renderLanding(){
  +'<section id="faq" class="max-w-4xl mx-auto px-4 pb-20">'
  +'<h2 class="sec-title">الأسئلة الشائعة</h2>'
  +'<div class="mt-8 space-y-3">'
- +[['هل يخترع الـ AI معلومات غير موجودة؟','لا. يعمل بمبدأ Grounded AI: يجيب فقط من قاعدة معرفتك، وإذا لم يجد المعلومة يعتذر بوضوح ويعرض التحويل لموظف — لا يستخدم معرفته العامة كبديل عن بياناتك.'],['هل تختلط معرفة وكلاء مختلفين؟','لا. كل مصدر معرفة يرتبط بـ Agent محدد، والاسترجاع يتم من معرفة ذلك الـ Agent فقط.'],['ماذا يحدث عندما يطلب العميل موظفًا؟','تتحول المحادثة إلى Human Handoff ويتوقف الـ AI عن الرد حتى يعيد الموظف تفعيله.'],['كيف يُصنَّف العملاء؟','تلقائيًا عبر تحليل المحادثة: مشتري، مهتم، عميل محتمل، يحتاج متابعة... مع Lead Score من 0 إلى 100 ووسوم قابلة للتعديل.'],['هل بياناتي معزولة؟','نعم، سياسات RLS على مستوى قاعدة البيانات تربط كل سجل بمساحة عملك فقط، والتحقق من الويدجت يتم على الخادم.']].map(function(f){return '<details class="faq glass rounded-xl group"><summary class="flex items-center justify-between cursor-pointer px-5 py-4 font-semibold text-sm list-none">'+f[0]+'<span class="text-tiffany-400 transition group-open:rotate-45 text-xl leading-none">+</span></summary><p class="px-5 pb-5 text-sm text-ink-400 leading-7">'+f[1]+'</p></details>'}).join('')
+ +[['هل يخترع الـ AI معلومات غير موجودة؟','لا. يعمل بمبدأ Grounded AI: يجيب فقط من قاعدة معرفتك، وإذا لم يجد المعلومة يعتذر بوضوح ويعرض التحويل لموظف — لا يستخدم معرفته العامة كبديل عن بياناتك.'],['هل تختلط معرفة وكلاء مختلفين؟','لا. كل مصدر معرفة يرتبط بـ Agent محدد، والاسترجاع يتم من معرفة ذلك الـ Agent فقط.'],['هل يبقى تسجيل الدخول محفوظًا؟','نعم، جلستك تُحفظ تلقائيًا ولا تحتاج لتسجيل الدخول في كل زيارة.'],['ماذا يحدث عندما يطلب العميل موظفًا؟','تتحول المحادثة إلى Human Handoff ويتوقف الـ AI عن الرد حتى يعيد الموظف تفعيله.'],['هل بياناتي معزولة؟','نعم، سياسات RLS على مستوى قاعدة البيانات تربط كل سجل بمساحة عملك فقط.']].map(function(f){return '<details class="faq glass rounded-xl group"><summary class="flex items-center justify-between cursor-pointer px-5 py-4 font-semibold text-sm list-none">'+f[0]+'<span class="text-tiffany-400 transition group-open:rotate-45 text-xl leading-none">+</span></summary><p class="px-5 pb-5 text-sm text-ink-400 leading-7">'+f[1]+'</p></details>'}).join('')
  +'</div></section>'
  +'<section class="max-w-5xl mx-auto px-4 pb-24">'
  +'<div class="rounded-3xl p-10 md:p-14 text-center relative overflow-hidden border border-tiffany-500/30 bg-gradient-to-b from-tiffany-500/15 to-transparent">'
@@ -1145,7 +1002,7 @@ function renderLanding(){
 function renderAuth(mode){
  var titles={login:['مرحبًا بعودتك','سجّل دخولك لمتابعة إدارة موظفيك الرقميين.'],signup:['أنشئ حسابك','مساحة عمل معزولة جاهزة خلال ثوانٍ.'],forgot:['استعادة كلمة المرور','أدخل بريدك وسنرسل رابط إعادة التعيين.']};
  var form='';
- var demoBtn='<button type="button" data-action="demo-enter" class="btn-ghost w-full !py-3 !border-dashed text-ink-300">'+icon('eye','w-4 h-4')+' استكشاف المنصة بدون حساب (وضع تجريبي)</button>';
+ var demoBtn='<button type="button" data-action="demo-enter" class="btn-ghost w-full !py-3 !border-dashed text-ink-300">'+icon('eye','w-4 h-4')+' استكشاف المنصة بدون حساب (وضع تجريبي — يبقى محفوظًا)</button>';
  if(mode==='login')form='<form id="f-login" class="space-y-4">'
   +'<label class="lbl">البريد الإلكتروني<input name="email" type="email" required class="inp" placeholder="you@company.com"></label>'
   +'<label class="lbl">كلمة المرور<input name="pass" type="password" required class="inp" placeholder="••••••••"></label>'
@@ -1167,7 +1024,7 @@ function renderAuth(mode){
   +'<button class="btn-primary w-full !py-3">إرسال رابط الاستعادة</button>'
   +'<p class="text-sm text-ink-400 text-center"><a class="text-tiffany-400" href="#/login">العودة لتسجيل الدخول</a></p></form>';
  var modeBadge=isRemote()
-  ?'<div class="flex items-center gap-2 text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-3 py-1.5 mb-6 w-fit">'+icon('db','w-3.5 h-3.5')+' متصل بقاعدة بيانات Supabase — المصادقة حقيقية</div>'
+  ?'<div class="flex items-center gap-2 text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-3 py-1.5 mb-6 w-fit">'+icon('db','w-3.5 h-3.5')+' متصل بقاعدة بيانات Supabase — جلستك ستبقى محفوظة</div>'
   :(PROD
     ?'<div class="flex items-center gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1.5 mb-6 w-fit">'+icon('shield','w-3.5 h-3.5')+' التسجيل الحقيقي يتطلب اتصال الخادم — <a href="#/setup" class="underline">اربط Supabase</a> أو جرّب الوضع التجريبي</div>'
     :'<div class="flex items-center gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1.5 mb-6 w-fit">'+icon('bolt','w-3.5 h-3.5')+' وضع تطوير محلي</div>');
@@ -1187,7 +1044,6 @@ function renderAuth(mode){
 }
 
 /* ================= Setup ================= */
-var SQL_SCHEMA="-- Awn AI — Phase 1 Schema (workspaces / agents / widgets / knowledge_docs /\n-- contacts / conversations / invoices) + RLS policies.\n-- النسخة الكاملة موجودة في ملف التسليم السابق — شغّلها في SQL Editor.";
 var engTab='secrets';
 var ENG_TABS=[['secrets','١. المفاتيح والنشر'],['sql2','٢. ترحيل قاعدة البيانات'],['sql3','٣. عزل المعرفة'],['ai','ai-respond'],['verify','verify-widget'],['kbproc','kb-process'],['crawl','kb-crawl'],['widgetjs','widget.js'],['steps','خطوات النشر']];
 var ENG_SRC={secrets:'src-secrets',sql2:'src-sql2',sql3:'src-sql3',ai:'src-ai',verify:'src-verify',kbproc:'src-kbproc',crawl:'src-crawl',widgetjs:'src-widgetjs'};
@@ -1198,8 +1054,7 @@ var ENG_STEPS='<ol class="list-decimal pr-5 space-y-3 text-sm text-ink-300 leadi
  +'<li>ثبّت السر: <span class="ltr">supabase secrets set GEMINI_API_KEY=...</span></li>'
  +'<li>ارفع <span class="ltr">widget.js</span> على CDN واستبدل مصدر السكربت في كود التضمين.</li>'
  +'<li>أنشئ ويدجت من لوحة التحكم — يُكتب مباشرة في جدول <span class="ltr">widgets</span>.</li>'
- +'<li>اختبر الـ Grounding: أضف «كيك شوكولاتة — 20,000 دينار» واسأل عنها ثم عن iPhone 17.</li>'
- +'<li>اختبر المزامنة: أضف رابطًا ثم اضغط «مزامنة الآن» مرتين — بدون تكرار مقاطع.</li></ol>';
+ +'<li>ملاحظة: زحف المواقع ورفع الملفات يعملان تلقائيًا داخل المتصفح أيضًا، وتُستخدم دوال الخادم عند توفرها للتضمينات الدلالية.</li></ol>';
 
 function renderSetup(){
  var connected=isRemote();
@@ -1207,10 +1062,10 @@ function renderSetup(){
   ['Supabase + قاعدة البيانات + RLS',true],
   ['حفظ الودجات/الوكلاء مباشرة في Supabase',true],
   ['widget.js + verify-widget + ai-respond',true],
-  ['Knowledge Base: ملفات + زحف + نصوص يدوية',true],
+  ['Knowledge Base: زحف + ملفات + نصوص (تعمل فعليًا)',true],
   ['عزل المعرفة لكل Agent + Grounded AI',true],
   ['CRM: تصنيف + Lead Score + وسوم تلقائية',true],
-  ['تخصيص ويدجت كامل + مزامنة المواقع',true],
+  ['تخصيص ويدجت كامل + جلسة دائمة',true],
   ['Billing + دفع حقيقي + إشعارات بريد',false]];
  document.getElementById('app').innerHTML='<div class="min-h-screen max-w-4xl mx-auto px-4 py-10">'
  +'<div class="flex items-center justify-between mb-8 flex-wrap gap-3">'
@@ -1275,7 +1130,7 @@ function renderTest(){
  +'<div class="grid sm:grid-cols-3 gap-4 mt-10 text-right">'
  +[['سماعة بلوتوث برو','199 ر.س'],['شاحن سريع 45 واط','89 ر.س'],['حقيبة لابتوب','149 ر.س']].map(function(p){return '<div class="rounded-2xl border border-slate-200 p-5 bg-white shadow-sm"><div class="h-28 rounded-xl bg-slate-100 mb-4"></div><b>'+p[0]+'</b><div class="text-tiffany-600 font-bold mt-1">'+p[1]+'</div></div>'}).join('')
  +'</div></div>'
- +'<div class="max-w-5xl mx-auto px-4 pb-16 text-sm text-slate-500 leading-7">جرّب الـ Grounding: اسأل عن منتج موجود في قاعدة المعرفة ثم عن منتج غير موجود — وراقب التصنيف ودرجة الاهتمام في صفحة العملاء.</div>'
+ +'<div class="max-w-5xl mx-auto px-4 pb-16 text-sm text-slate-500 leading-7">جرّب الـ Grounding: اسأل عن منتج موجود في قاعدة المعرفة ثم عن منتج غير موجود — وراقب المحادثة والتصنيف في لوحة التحكم.</div>'
  +'</div><div id="test-widget"></div>';
  var tw=document.getElementById('test-widget');
  if(w.enabled&&tw)mountWidget(tw,w,agent,{fixed:true,persist:true,credit:true});
@@ -1304,9 +1159,9 @@ function dashShell(page,body,title){
  +'<nav class="flex-1 overflow-y-auto p-3 space-y-1">'+navBtns+'</nav>'
  +'<div class="p-3 border-t border-ink-800 space-y-1 flex-none">'
  +(isRemote()
-   ?'<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/20">'+icon('db','w-4 h-4')+' Supabase متصل</button>'
+   ?'<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/20">'+icon('db','w-4 h-4')+' Supabase متصل — الجلسة محفوظة</button>'
    :(isDemo
-     ?'<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20">'+icon('eye','w-4 h-4')+' وضع تجريبي — بدون حساب</button>'
+     ?'<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20">'+icon('eye','w-4 h-4')+' وضع تجريبي — محفوظ تلقائيًا</button>'
      :'<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20">'+icon('db','w-4 h-4')+' وضع محلي — اربط الخلفية</button>'))
  +'<button data-action="go" data-to="#/test" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm text-ink-300 hover:bg-ink-850">'+icon('globe','w-[18px] h-[18px]')+' موقع تجريبي</button>'
  +'<button data-action="logout" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm text-red-300 hover:bg-red-500/10">'+icon('out','w-[18px] h-[18px]')+' '+(isDemo?'الخروج من الوضع التجريبي':'تسجيل الخروج')+'</button>'
@@ -1314,7 +1169,7 @@ function dashShell(page,body,title){
  +'<div class="flex-1 min-w-0">'
  +'<header class="h-16 sticky top-0 z-30 glass flex items-center justify-between px-4 md:px-8">'
  +'<div class="flex items-center gap-3"><button data-action="sb" class="lg:hidden text-ink-300">'+icon('menu')+'</button><h1 class="font-display font-bold text-lg">'+title+'</h1>'
- +(isDemo?'<span class="hidden sm:inline-flex text-[10px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-2.5 py-1">وضع تجريبي</span>':'')+'</div>'
+ +(isDemo?'<span class="hidden sm:inline-flex text-[10px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-2.5 py-1">وضع تجريبي — البيانات محلية لكنها محفوظة</span>':'')+'</div>'
  +'<div class="flex items-center gap-3">'
  +'<span class="hidden sm:flex items-center gap-2 text-xs text-ink-400 bg-ink-850 border border-ink-800 rounded-full px-3 py-1.5">'+icon('bolt','w-3.5 h-3.5 text-tiffany-400')+' '+s.usage.ai+' / '+PLANS[s.plan].msgs+' رسالة AI</span>'
  +'<div class="w-9 h-9 rounded-full bg-tiffany-500/15 border border-tiffany-500/40 text-tiffany-300 flex items-center justify-center font-bold text-sm">'+esc(u.name.charAt(0))+'</div>'
@@ -1361,8 +1216,8 @@ function pgHome(){
  var banner=isRemote()
   ?'<div class="mb-4 text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2">'+icon('db','w-4 h-4')+' البيانات محفوظة ومتزامنة مع Supabase — Workspace: <span class="ltr">'+esc((w.__wid||'').slice(0,8))+'…</span></div>'
   :(isDemo
-   ?'<div class="mb-4 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2 flex-wrap">'+icon('eye','w-4 h-4')+' أنت في وضع تجريبي بدون حساب — البيانات محلية ومؤقتة. <a class="underline font-bold" href="#/signup">أنشئ حسابًا حقيقيًا</a></div>'
-   :'<div class="mb-4 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2 flex-wrap">'+icon('bolt','w-4 h-4')+' تعمل الآن على تخزين محلي تجريبي. <button data-action="go" data-to="#/setup" class="underline font-bold">اربط قاعدة بيانات Supabase →</button></div>');
+   ?'<div class="mb-4 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2 flex-wrap">'+icon('eye','w-4 h-4')+' وضع تجريبي بدون حساب — بياناتك المحلية محفوظة وتبقى بعد إعادة الفتح. <a class="underline font-bold" href="#/signup">أنشئ حسابًا حقيقيًا</a></div>'
+   :'<div class="mb-4 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2 flex-wrap">'+icon('bolt','w-4 h-4')+' تعمل الآن على تخزين محلي. <button data-action="go" data-to="#/setup" class="underline font-bold">اربط قاعدة بيانات Supabase →</button></div>');
  return banner
  +'<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">'
  +statCard('chat','المحادثات',w.convos.length,handoffCount()+' بانتظار تحويل بشري')
@@ -1383,7 +1238,7 @@ function pgHome(){
  +'<div class="grid lg:grid-cols-3 gap-4 mt-4">'
  +'<div class="lg:col-span-2 glass rounded-2xl p-6"><div class="flex items-center justify-between mb-5"><h3 class="font-display font-bold">نشاط الرسائل — 14 يومًا</h3><button data-action="go" data-to="#/app/analytics" class="text-xs text-tiffany-400 hover:underline">التحليلات الكاملة</button></div>'
  +'<div class="flex items-end gap-1.5 h-36">'+days.map(function(d){return '<div class="flex-1 rounded-t-md bar '+(d?'bg-tiffany-500/70':'bg-ink-800')+'" style="height:'+Math.max(d/max*100,4)+'%" title="'+d+'"></div>'}).join('')+'</div></div>'
- +'<div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">أحدث المحادثات</h3><div class="space-y-2">'+(recent||'<p class="text-sm text-ink-500">لا محادثات بعد.</p>')+'</div></div>'
+ +'<div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">أحدث المحادثات</h3><div class="space-y-2">'+(recent||'<p class="text-sm text-ink-500">لا محادثات بعد — افتح «موقع تجريبي» وابدأ أول محادثة حقيقية.</p>')+'</div></div>'
  +'</div>';
 }
 var selConvo=null;
@@ -1395,7 +1250,7 @@ function pgConvos(h){
  var c=w.convos.find(function(x){return x.id===selConvo});
  var list=w.convos.map(function(c2){var ct=w.contacts.find(function(x){return x.id===c2.contactId});
   return '<button data-action="go" data-to="#/app/conversations?c='+c2.id+'" class="w-full text-right flex items-center gap-3 rounded-xl p-2.5 transition '+(c2.id===selConvo?'bg-tiffany-500/10 border border-tiffany-500/30':'hover:bg-ink-850 border border-transparent')+'"><div class="w-9 h-9 rounded-full bg-ink-800 flex items-center justify-center text-xs font-bold text-tiffany-300 flex-none">'+esc(((ct&&ct.name)||'ز').charAt(0))+'</div><div class="flex-1 min-w-0"><div class="flex items-center justify-between gap-2"><span class="text-sm font-semibold truncate">'+esc((ct&&ct.name)||'زائر')+'</span><span class="text-[10px] text-ink-500 flex-none">'+timeAgo(c2.updatedAt)+'</span></div><div class="flex items-center gap-2 mt-0.5"><span class="text-[11px] text-ink-500 truncate flex-1">'+esc((c2.messages[c2.messages.length-1]||{}).text||'—')+'</span>'+statusBadge(c2.status)+'</div></div></button>'}).join('');
- var right='<div class="flex-1 flex items-center justify-center text-ink-500 text-sm">اختر محادثة</div>';
+ var right='<div class="flex-1 flex items-center justify-center text-ink-500 text-sm">لا توجد محادثة محددة — افتح «موقع تجريبي» لإنشاء محادثة حقيقية</div>';
  if(c){
   var ct=w.contacts.find(function(x){return x.id===c.contactId});
   var ag=w.agents.find(function(a){return a.id===c.agentId});
@@ -1548,7 +1403,7 @@ function pgContacts(){
   +'<td class="px-4 py-3"><div class="flex gap-1"><button data-action="note" data-id="'+c.id+'" class="btn-ghost !py-1 !px-2.5 text-[11px]">ملاحظات</button><button data-action="del-contact" data-id="'+c.id+'" class="p-1.5 text-red-400 hover:bg-red-500/10 rounded-lg">'+icon('trash','w-3.5 h-3.5')+'</button></div></td></tr>'}).join('');
  return '<div class="glass rounded-2xl overflow-x-auto"><table class="w-full text-sm min-w-[900px]">'
  +'<thead class="text-ink-500 text-xs border-b border-ink-800"><tr>'+['العميل','التواصل','التصنيف','Lead Score','آخر نشاط','محادثات','وسوم',''].map(function(hh){return '<th class="text-right px-4 py-3 font-medium">'+hh+'</th>'}).join('')+'</tr></thead>'
- +'<tbody>'+(rows||'<tr><td colspan="8" class="p-10 text-center text-ink-500">لا عملاء بعد — الزوار يظهرون هنا تلقائيًا من الويدجت.</td></tr>')+'</tbody></table></div>';
+ +'<tbody>'+(rows||'<tr><td colspan="8" class="p-10 text-center text-ink-500">لا عملاء بعد — يُنشأ العميل تلقائيًا مع أول محادثة من الويدجت.</td></tr>')+'</tbody></table></div>';
 }
 function agentOptions(sel){
  return '<option value="">مشترك — كل الوكلاء</option>'+ws().agents.map(function(a){return '<option value="'+a.id+'"'+(sel===a.id?' selected':'')+'>'+esc(a.name)+'</option>'}).join('');
@@ -1557,6 +1412,33 @@ function kbStatusBadge(k){
  if(k.status==='processing')return '<span class="text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5 flex-none">جاري التحميل...</span>';
  if(k.status==='error')return '<span class="text-[10px] bg-red-500/15 text-red-300 border border-red-500/30 rounded-full px-2 py-0.5 flex-none">فشل</span>';
  return '<span class="text-[10px] bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 rounded-full px-2 py-0.5 flex-none">'+(k.type==='url'?'متزامن':'تمت المعالجة')+'</span>';
+}
+/* إضافة مصدر واحدة: نافذة واحدة فيها ٣ خيارات بسيطة (رابط / ملف / نص) */
+var kbTab='url';
+function kbTabView(){
+ if(kbTab==='url')return '<form id="f-kb-url" class="space-y-3">'
+  +'<label class="lbl2">رابط الموقع (يزحف حتى 10 صفحات ضمن نفس النطاق)<input name="url" type="url" required class="inp-s ltr" placeholder="https://example.com"></label>'
+  +'<label class="lbl2">الـ Agent المرتبط (عزل المعرفة)<select name="agentId" class="inp-s">'+agentOptions('')+'</select></label>'
+  +'<button class="btn-primary w-full">إضافة ومزامنة الآن</button></form>';
+ if(kbTab==='file')return '<form id="f-kb-file" class="space-y-3">'
+  +'<label class="lbl2">ملف (PDF / DOCX / TXT / CSV / XLSX)<input id="kb-file2" type="file" required accept=".pdf,.txt,.docx,.csv,.xlsx,.md" class="inp-s"></label>'
+  +'<label class="lbl2">الـ Agent المرتبط (عزل المعرفة)<select name="agentId" class="inp-s">'+agentOptions('')+'</select></label>'
+  +'<button class="btn-primary w-full">رفع ومعالجة</button></form>';
+ return '<form id="f-kb-text" class="space-y-3">'
+  +'<label class="lbl2">المعلومات (مصدر معرفة فقط — الـ AI يجيب منها حصرًا)<textarea name="content" rows="6" required class="inp-s" placeholder="مثال: كيك شوكولاتة — السعر: 20,000 دينار"></textarea></label>'
+  +'<label class="lbl2">العنوان (اختياري — يُستنتج تلقائيًا إن تركته فارغًا)<input name="title" class="inp-s" placeholder="معلومات المنتجات"></label>'
+  +'<label class="lbl2">الـ Agent المرتبط (عزل المعرفة)<select name="agentId" class="inp-s">'+agentOptions('')+'</select></label>'
+  +'<button class="btn-primary w-full">حفظ ومعالجة</button></form>';
+}
+function kbAddModal(){
+ modal('<h3 class="font-display font-bold text-lg mb-1">'+icon('plus','w-5 h-5 inline text-tiffany-400')+' إضافة مصدر معرفة</h3>'
+ +'<p class="text-xs text-ink-500 mb-4">اختر نوع المصدر — تتم المعالجة تلقائيًا ويظهر عدد المقاطع فور انتهائها.</p>'
+ +'<div class="flex gap-2 mb-4">'
+ +'<button type="button" data-action="kb-tab" data-id="url" class="eng-tab '+(kbTab==='url'?'on':'')+'">🌐 رابط موقع</button>'
+ +'<button type="button" data-action="kb-tab" data-id="file" class="eng-tab '+(kbTab==='file'?'on':'')+'">📄 ملف</button>'
+ +'<button type="button" data-action="kb-tab" data-id="text" class="eng-tab '+(kbTab==='text'?'on':'')+'">✍️ نص يدوي</button>'
+ +'</div>'
+ +'<div id="kb-tab-view">'+kbTabView()+'</div>');
 }
 function pgKB(){
  var w=ws();
@@ -1584,17 +1466,10 @@ function pgKB(){
   +(k.type==='text'?'<button data-action="kb-edit" data-id="'+k.id+'" class="p-2 text-ink-400 hover:text-white hover:bg-ink-800 rounded-lg" title="تعديل">'+icon('edit','w-4 h-4')+'</button>':'')
   +'<button data-action="kb-del" data-id="'+k.id+'" class="p-2 text-red-400 hover:bg-red-500/10 rounded-lg" title="حذف">'+icon('trash','w-4 h-4')+'</button>'
   +'</div></div></div>'}).join('');
- return '<div class="grid lg:grid-cols-[380px_1fr] gap-5 items-start">'
- +'<div class="glass rounded-2xl p-6 space-y-5">'
- +'<h3 class="font-display font-bold flex items-center gap-2">'+icon('plus','w-5 h-5 text-tiffany-400')+' إضافة مصدر معرفة</h3>'
- +'<form id="f-kb-text"><div class="text-xs text-ink-400 mb-1.5">✍️ نص يدوي</div><textarea name="content" rows="4" required class="inp-s" placeholder="مثال: اسم المنتج: كيك شوكولاتة — السعر: 20,000 دينار"></textarea><input name="title" class="inp-s mt-2" placeholder="العنوان" required><label class="lbl2 mt-2">الـ Agent المرتبط<select name="agentId" class="inp-s">'+agentOptions('')+'</select></label><button class="btn-primary w-full mt-3 !py-2.5 text-sm">حفظ ومعالجة</button></form>'
- +'<form id="f-kb-url"><div class="text-xs text-ink-400 mb-1.5">🌐 رابط موقع (زحف حتى 10 صفحات)</div><div class="flex gap-2"><input name="url" type="url" required class="inp-s ltr" placeholder="https://example.com"><button class="btn-ghost !px-4 flex-none">'+icon('globe','w-4 h-4')+'</button></div><label class="lbl2 mt-2">الـ Agent المرتبط<select name="agentId" class="inp-s">'+agentOptions('')+'</select></label></form>'
- +'<div><div class="text-xs text-ink-400 mb-1.5">📄 ملف (PDF / DOCX / TXT / CSV / XLSX)</div><label class="btn-ghost w-full cursor-pointer !py-2.5 text-sm">'+icon('doc','w-4 h-4')+' رفع ملف<input id="kb-file" type="file" accept=".pdf,.txt,.docx,.csv,.xlsx" class="hidden"></label><label class="lbl2 mt-2">الـ Agent المرتبط<select id="kb-file-agent" class="inp-s">'+agentOptions('')+'</select></label></div>'
- +'</div>'
- +'<div class="space-y-3">'
- +'<div class="flex items-center justify-between flex-wrap gap-2"><h3 class="font-display font-bold">المصادر ('+w.kb.length+')</h3><div class="text-[11px] text-ink-500">كل مصدر معزول حسب الـ Agent — لا تداخل بين الوكلاء.</div></div>'
- +(docs||'<div class="glass rounded-2xl p-12 text-center text-ink-500">لا مصادر بعد.</div>')
- +'</div></div>';
+ return '<div class="flex items-center justify-between mb-5 flex-wrap gap-3">'
+ +'<div><h2 class="font-display font-bold text-xl">Knowledge Base</h2><p class="text-xs text-ink-500 mt-1">كل مصدر معزول حسب الـ Agent — لا تداخل بين الوكلاء. الزحف والملفات تعمل فورًا.</p></div>'
+ +'<button data-action="kb-add" class="btn-primary">'+icon('plus','w-4 h-4')+' إضافة مصدر</button></div>'
+ +'<div class="space-y-3">'+(docs||'<div class="glass rounded-2xl p-12 text-center text-ink-500">لا مصادر بعد — اضغط «إضافة مصدر» وأضف رابط موقعك أو ملفًا أو نصًا.</div>')+'</div>';
 }
 function pgAnalytics(){
  var w=ws();var total=w.convos.length||1;
@@ -1621,7 +1496,7 @@ function pgAnalytics(){
  +'<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-amber-500"></span>تحويل بشري: <b>'+hand+'</b></div>'
  +'<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-ink-700"></span>مغلقة: <b>'+closed+'</b></div></div></div></div>'
  +'<div class="lg:col-span-2 glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">توزيع تصنيفات العملاء</h3>'
- +'<div class="space-y-2">'+(clsCounts.map(function(x){return '<div class="flex items-center gap-3"><span class="text-xs text-ink-400 w-24 flex-none">'+esc(x.cl)+'</span><div class="flex-1 h-6 bg-ink-850 rounded-lg overflow-hidden"><div class="h-full bg-tiffany-500/25 border-l border-tiffany-500/50 flex items-center px-3 text-xs" style="width:'+Math.max(x.n/clsMax*100,10)+'%">'+x.n+'</div></div></div>'}).join('')||'<p class="text-sm text-ink-500">لا بيانات بعد.</p>')+'</div></div>'
+ +'<div class="space-y-2">'+(clsCounts.map(function(x){return '<div class="flex items-center gap-3"><span class="text-xs text-ink-400 w-24 flex-none">'+esc(x.cl)+'</span><div class="flex-1 h-6 bg-ink-850 rounded-lg overflow-hidden"><div class="h-full bg-tiffany-500/25 border-l border-tiffany-500/50 flex items-center px-3 text-xs" style="width:'+Math.max(x.n/clsMax*100,10)+'%">'+x.n+'</div></div></div>'}).join('')||'<p class="text-sm text-ink-500">لا بيانات بعد — ستظهر التصنيفات تلقائيًا مع أول محادثات حقيقية.</p>')+'</div></div>'
  +'<div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">أكثر المواضيع ورودًا</h3>'
  +'<div class="space-y-2">'+(top.map(function(t,i){return '<div class="flex items-center gap-3"><span class="text-xs text-ink-500 w-4">'+(i+1)+'</span><div class="flex-1 h-7 bg-ink-850 rounded-lg overflow-hidden"><div class="h-full bg-tiffany-500/25 border-l border-tiffany-500/50 rounded-lg flex items-center px-3 text-xs" style="width:'+Math.max(t[1]/top[0][1]*100,15)+'%">'+esc(t[0])+' — '+t[1]+'</div></div></div>'}).join('')||'<p class="text-sm text-ink-500">لا بيانات كافية.</p>')+'</div></div>'
  +'</div>';
@@ -1638,7 +1513,7 @@ function pgSettings(){
  +'<button data-action="save-settings" class="btn-primary">حفظ الإعدادات</button></div>'
  +'<div class="space-y-5">'
  +'<div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">الفريق</h3>'
- +'<div class="space-y-2 mb-4">'+s.team.map(function(t){return '<div class="flex items-center justify-between bg-ink-850 border border-ink-800 rounded-xl px-4 py-2.5 text-sm"><span class="ltr">'+esc(t.email)+'</span><span class="text-[10px] text-tiffany-300 bg-tiffany-500/10 rounded-full px-2 py-0.5">'+esc(t.role)+'</span></div>'}).join('')+'</div>'
+ +'<div class="space-y-2 mb-4">'+(s.team||[]).map(function(t){return '<div class="flex items-center justify-between bg-ink-850 border border-ink-800 rounded-xl px-4 py-2.5 text-sm"><span class="ltr">'+esc(t.email)+'</span><span class="text-[10px] text-tiffany-300 bg-tiffany-500/10 rounded-full px-2 py-0.5">'+esc(t.role)+'</span></div>'}).join('')+'</div>'
  +'<form id="f-team" class="flex gap-2"><input name="email" type="email" required class="inp-s ltr" placeholder="teammate@company.com"><button class="btn-ghost !px-4 flex-none">'+icon('plus','w-4 h-4')+'</button></form></div>'
  +'<div class="glass rounded-2xl p-6 border-red-500/20"><h3 class="font-display font-bold mb-2 text-red-300">منطقة الخطر</h3>'
  +'<p class="text-xs text-ink-500 mb-4">إجراءات لا يمكن التراجع عنها.</p>'
@@ -1654,7 +1529,7 @@ function pgBilling(){
  +'<ul class="text-xs text-ink-400 space-y-2 mb-5">'+p.feat.map(function(f){return '<li class="flex gap-2">'+icon('check','w-3.5 h-3.5 text-tiffany-500 mt-0.5 flex-none')+' '+f+'</li>'}).join('')+'</ul>'
  +(k===w.plan?'<button class="btn-ghost w-full" disabled>مفعّلة</button>':'<button data-action="choose-plan" data-id="'+k+'" class="'+(k==='growth'?'btn-primary':'btn-ghost')+' w-full">الترقية إلى '+p.name+'</button>')
  +'</div>'}).join('');
- var invRows=w.invoices.map(function(i){return '<tr class="border-t border-ink-850"><td class="px-5 py-3 ltr text-xs">'+esc(i.id)+'</td><td class="px-5 py-3">'+esc(i.plan)+'</td><td class="px-5 py-3">'+i.amount+' ريال</td><td class="px-5 py-3 text-ink-400">'+fmtDate(i.date)+'</td><td class="px-5 py-3"><button data-action="inv" class="text-xs text-tiffany-400 hover:underline">تنزيل PDF</button></td></tr>'}).join('');
+ var invRows=(w.invoices||[]).map(function(i){return '<tr class="border-t border-ink-850"><td class="px-5 py-3 ltr text-xs">'+esc(i.id)+'</td><td class="px-5 py-3">'+esc(i.plan)+'</td><td class="px-5 py-3">'+i.amount+' ريال</td><td class="px-5 py-3 text-ink-400">'+fmtDate(i.date)+'</td><td class="px-5 py-3"><button data-action="inv" class="text-xs text-tiffany-400 hover:underline">تنزيل PDF</button></td></tr>'}).join('');
  return '<div class="glass rounded-2xl p-6 mb-5">'
  +'<div class="flex flex-wrap items-center justify-between gap-3 mb-3"><h3 class="font-display font-bold">استخدام رسائل AI هذا الشهر</h3><span class="text-sm text-ink-400">'+w.usage.ai+' / '+cap+'</span></div>'
  +'<div class="h-3 bg-ink-850 rounded-full overflow-hidden"><div class="h-full bg-gradient-to-l from-tiffany-400 to-tiffany-600 rounded-full transition-all" style="width:'+pct+'%"></div></div>'
@@ -1662,7 +1537,7 @@ function pgBilling(){
  +'<div class="grid md:grid-cols-3 gap-5 mb-6">'+plans+'</div>'
  +'<div class="glass rounded-2xl overflow-hidden"><div class="px-5 py-4 font-display font-bold border-b border-ink-800">الفواتير</div>'
  +'<div class="overflow-x-auto"><table class="w-full text-sm min-w-[560px]"><thead class="text-ink-500 text-xs"><tr><th class="text-right px-5 py-3">الفاتورة</th><th class="text-right px-5 py-3">الخطة</th><th class="text-right px-5 py-3">المبلغ</th><th class="text-right px-5 py-3">التاريخ</th><th class="text-right px-5 py-3"></th></tr></thead>'
- +'<tbody>'+invRows+'</tbody></table></div></div>';
+ +'<tbody>'+(invRows||'<tr><td colspan="5" class="p-8 text-center text-ink-500">لا فواتير بعد.</td></tr>')+'</tbody></table></div></div>';
 }
 
 /* ---- Modals ---- */
@@ -1722,8 +1597,8 @@ document.addEventListener('click',function(e){
  else if(a==='scroll'){e.preventDefault();var el=document.querySelector(t.dataset.to);if(el)el.scrollIntoView({behavior:'smooth'})}
  else if(a==='demo-enter'){
    if(isRemote()){toast('أنت متصل بالخادم — سجّل الدخول أو أنشئ حسابًا حقيقيًا','err');return}
-   db.demo=true;db.ws=starterKit();persist();
-   toast('دخلت في وضع تجريبي بدون حساب — البيانات محلية ومؤقتة','ok');go('#/app')}
+   db.demo=true;if(!db.ws)db.ws=starterKit();persist();
+   toast('دخلت في وضع تجريبي بدون حساب — جلستك وبياناتك تبقى محفوظة','ok');go('#/app')}
  else if(a==='logout'){
    if(isRemote()){sbClient().auth.signOut()}
    else{db.session=null;db.demo=false;db.ws=null;persist()}
@@ -1749,7 +1624,7 @@ document.addEventListener('click',function(e){
          toast('فشل الحفظ في قاعدة البيانات: '+err.message,'err');
          save();route();
        });
-     }else{save();toast('تم حفظ إعدادات الويدجت','ok')}
+     }else{save();toast('تم حفظ إعدادات الويدجت ✔','ok')}
    }}
  else if(a==='embed')embedModal(id);
  else if(a==='copy-embed'){var wC=cur(id);if(wC){var apiC=apiBase()||'https://YOUR-PROJECT.supabase.co/functions/v1';copyText('<script src="https://cdn.aown.app/widget.js" data-widget-id="'+wC.id+'" data-token="'+wC.token+'" data-api="'+apiC+'" async><'+'/script>')}}
@@ -1774,6 +1649,15 @@ document.addEventListener('click',function(e){
      }else{save();toast(wT.enabled?'تم تفعيل الويدجت':'تم تعطيل الويدجت','ok');afterT()}
    }}
  else if(a==='modal-close')closeModal();
+ else if(a==='kb-add'){kbTab='url';kbAddModal()}
+ else if(a==='kb-tab'){kbTab=id;var v=document.getElementById('kb-tab-view');if(v)v.innerHTML=kbTabView();$$('#modal-root .eng-tab').forEach(function(b){b.classList.toggle('on',b.dataset.id===id)})}
+ else if(a==='kb-sync'){
+   var docS=kbDoc(id);
+   if(docS&&docS.type==='url'){toast('جارٍ إعادة مزامنة الموقع...');processUrl(docS.name,docS)}
+   else toast('المزامنة متاحة لمصادر الروابط فقط','err');
+ }
+ else if(a==='kb-edit'){var docE=kbDoc(id);if(docE)modal('<h3 class="font-display font-bold mb-3">تعديل المصدر اليدوي</h3><form id="f-kb-edit" class="space-y-3"><input type="hidden" name="id" value="'+docE.id+'"><label class="lbl2">العنوان (اختياري)<input name="title" class="inp-s" value="'+esc(docE.name)+'"></label><label class="lbl2">المحتوى (مصدر معرفة فقط — الـ AI يجيب منه حصرًا)<textarea name="content" rows="8" class="inp-s">'+esc(docE.content||'')+'</textarea></label><button class="btn-primary w-full">حفظ وإعادة المعالجة</button></form>')}
+ else if(a==='kb-del'){if(confirm('حذف هذا المصدر ومقاطعه؟')){ws().kb=ws().kb.filter(function(x){return x.id!==id});save();route()}}
  else if(a==='handoff'){var c=ws().convos.find(function(x){return x.id===id});if(c){c.status='handoff';c.messages.push({from:'system',text:'تم تحويل المحادثة يدويًا لفريق الدعم.',at:now()});var cust0=ws().contacts.find(function(x){return x.id===c.contactId});if(cust0)cust0.class='يحتاج متابعة';save();route()}}
  else if(a==='ai-back'){var c2=ws().convos.find(function(x){return x.id===id});if(c2){c2.status='active';c2.messages.push({from:'system',text:'أعاد الموظف تفعيل المساعد الذكي.',at:now()});save();route()}}
  else if(a==='close-convo'){var c3=ws().convos.find(function(x){return x.id===id});if(c3){c3.status='closed';save();route()}}
@@ -1783,23 +1667,6 @@ document.addEventListener('click',function(e){
  else if(a==='add-tag'){var c5=ws().contacts.find(function(x){return x.id===id});var v=prompt('اسم الوسم:');if(v&&c5){c5.tags=[...new Set((c5.tags||[]).concat([v]))];save();route()}}
  else if(a==='note'){var c6=ws().contacts.find(function(x){return x.id===id});if(c6)modal('<h3 class="font-display font-bold mb-3">ملاحظات '+esc(c6.name)+'</h3><textarea id="note-ta" rows="5" class="inp-s w-full">'+esc(c6.notes||'')+'</textarea><button data-action="note-save" data-id="'+c6.id+'" class="btn-primary w-full mt-3">حفظ</button>')}
  else if(a==='note-save'){var c7=ws().contacts.find(function(x){return x.id===id});if(c7){c7.notes=document.getElementById('note-ta').value;save();closeModal();toast('تم حفظ الملاحظات','ok')}}
- else if(a==='kb-del'){if(confirm('حذف هذا المصدر ومقاطعه؟')){ws().kb=ws().kb.filter(function(x){return x.id!==id});save();route()}}
- else if(a==='kb-edit'){var docE=kbDoc(id);if(docE)modal('<h3 class="font-display font-bold mb-3">تعديل المصدر اليدوي</h3><form id="f-kb-edit" class="space-y-3"><input type="hidden" name="id" value="'+docE.id+'"><label class="lbl2">العنوان<input name="title" class="inp-s" value="'+esc(docE.name)+'"></label><label class="lbl2">المحتوى (مصدر معرفة فقط — الـ AI يجيب منه حصرًا)<textarea name="content" rows="8" class="inp-s">'+esc(docE.content||'')+'</textarea></label><button class="btn-primary w-full">حفظ وإعادة المعالجة</button></form>')}
- else if(a==='kb-sync'){
-   var docS=kbDoc(id);
-   if(docS&&docS.type==='url'){
-     if(isRemote()&&cfg&&db.ws&&db.ws.__wid){
-       docS.status='processing';save();route();toast('جارٍ إعادة مزامنة الموقع...');
-       fetch(apiBase()+'/kb-crawl',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({url:docS.name,doc_id:docS.id,workspace_id:db.ws.__wid,agent_id:docS.agentId||null})})
-       .then(function(r){return r.json().catch(function(){return{}})}).then(function(j){
-         if(j.error)throw new Error(j.message||'فشل الزحف');
-         docS.status='ready';docS.chunkCount=j.chunks||0;docS.pages=j.pages||1;docS.lastSync=now();
-         docS.content='تمت إعادة المزامنة — '+(j.pages||1)+' صفحة، '+(j.chunks||0)+' مقطعًا (بدون تكرار).';
-         save();route();toast('تمت المزامنة ✔','ok');
-       }).catch(function(err){docS.status='error';docS.content='فشلت المزامنة: '+err.message;save();route();toast('فشلت المزامنة: '+err.message,'err')});
-     }else{toast('مزامنة المواقع الحقيقية تتطلب الاتصال بالخادم — اربط Supabase وانشر kb-crawl','err')}
-   }else{toast('المزامنة متاحة لمصادر الروابط فقط','err')}
- }
  else if(a==='av'){if(draft){draft.avatar=t.dataset.v;route()}}
  else if(a==='rm-logo'){if(draft){draft.logo='';route()}}
  else if(a==='tg'){if(draft){var k=t.dataset.b;draft[k]=!draft[k];route()}}
@@ -1838,46 +1705,6 @@ document.addEventListener('change',function(e){
  var tgt=e.target;if(!tgt)return;
  if(tgt.id==='w-avatar-file'||tgt.id==='w-logo-file'){var f=tgt.files[0];if(!f||!draft)return;var r=new FileReader();
   r.onload=function(){if(tgt.id==='w-avatar-file')draft.avatar=r.result;else draft.logo=r.result;route()};r.readAsDataURL(f);return}
- if(tgt.id==='kb-file'){
-   var f2=tgt.files[0];tgt.value='';
-   if(!f2)return;
-   var docId=uid('kb_');var name=f2.name;
-   var selAg=document.getElementById('kb-file-agent');
-   var agentId=selAg?selAg.value:'';
-   if(isRemote()&&cfg&&db.ws&&db.ws.__wid){
-     var doc={id:docId,name:name,type:'file',agentId:agentId,content:'جارٍ الرفع والمعالجة على الخادم...',status:'processing',chunks:[],createdAt:now()};
-     ws().kb.unshift(doc);save();route();
-     toast('جارٍ رفع الملف ومعالجته على الخادم...');
-     (async function(){
-       try{
-         var c=sbClient();var wid=db.ws.__wid;
-         var safe=name.replace(/[^\w.\-\u0600-\u06FF]+/g,'_');
-         var path=wid+'/'+docId+'/'+safe;
-         var up=await c.storage.from('kb-files').upload(path,f2,{upsert:true});
-         if(up.error)throw new Error('فشل الرفع: '+up.error.message);
-         var resp=await fetch(apiBase()+'/kb-process',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({doc_id:docId,path:path,name:name,agent_id:agentId||null})});
-         var j=await resp.json().catch(function(){return{}});
-         if(!resp.ok||j.error)throw new Error(j.message||('فشل في المعالجة ('+resp.status+')'));
-         doc.content=j.summary||('تمت المعالجة عبر الخادم — '+(j.chunks||0)+' مقطعًا.');
-         doc.chunkCount=j.chunks||0;doc.status='ready';doc.lastSync=now();
-         save();route();toast('تمت معالجة الملف وتخزين التضمينات ✔','ok');
-       }catch(err){
-         console.error(err);
-         doc.status='error';doc.content='فشلت المعالجة: '+err.message;
-         save();route();toast('فشلت معالجة الملف: '+err.message,'err');
-       }
-     })();
-     return;
-   }
-   var isTxt=/\.(txt|csv)$/i.test(f2.name);
-   if(isTxt){
-     var r2=new FileReader();
-     r2.onload=function(){var doc2={id:uid('kb_'),name:f2.name,type:'file',agentId:agentId,content:r2.result,status:'ready',createdAt:now(),lastSync:now()};chunkify(doc2);doc2.chunkCount=doc2.chunks.length;ws().kb.unshift(doc2);save();toast('تمت المعالجة محليًا: '+doc2.chunks.length+' مقطع','ok');route()};
-     r2.readAsText(f2);
-   }else{
-     toast('معالجة PDF/DOCX/XLSX الحقيقية تتطلب الاتصال بالخادم (المرحلة 2)','err');
-   }
-   return}
  var b=tgt.dataset?tgt.dataset.b:null;
  if(!b||!draft)return;
  draft[b]=tgt.type==='checkbox'?tgt.checked:tgt.value;
@@ -1907,7 +1734,7 @@ document.addEventListener('submit',async function(e){
        if(st)st.innerHTML='<div class="glass rounded-2xl p-5 text-sm text-red-300 border-red-500/30">⚠️ '+esc(msg)+'</div>';
      }else{
        toast('الاتصال ناجح وقاعدة البيانات جاهزة ✔','ok');
-       if(st)st.innerHTML='<div class="glass rounded-2xl p-5 text-sm text-emerald-300 border-emerald-500/30">✅ Supabase جاهز. أنشئ وكيلًا ومصدر معرفة وويدجت وابدأ الاختبار.</div>';
+       if(st)st.innerHTML='<div class="glass rounded-2xl p-5 text-sm text-emerald-300 border-emerald-500/30">✅ Supabase جاهز — سجّل الدخول وسيبقى محفوظًا.</div>';
        route();
      }});
    return}
@@ -1920,13 +1747,13 @@ document.addEventListener('submit',async function(e){
        remoteUser=res.data.user;db.demo=false;
        toast('جارٍ تحميل مساحة العمل...');
        var ok=await loadRemote();
-       if(ok){toast('مرحبًا بعودتك 👋','ok');go('#/app')}
+       if(ok){toast('مرحبًا بعودتك 👋 — جلستك ستبقى محفوظة','ok');go('#/app')}
      });
      return}
    if(PROD){toast('تسجيل الدخول الحقيقي يتطلب الاتصال بالخادم — اربط Supabase أو استخدم الوضع التجريبي','err');return}
    var u=db.users.find(function(x){return x.email===em&&x.pw===hashPw(pw)});
    if(!u){toast('بيانات الدخول غير صحيحة','err');return}
-   db.session=u.id;persist();toast('مرحبًا بعودتك 👋','ok');go('#/app')}
+   db.session=u.id;persist();toast('مرحبًا بعودتك 👋 — جلستك محفوظة','ok');go('#/app')}
  else if(f.id==='f-signup'){
    var em2=String(fd.get('email')).trim(),pw2=fd.get('pass');
    if(isRemote()){
@@ -1978,7 +1805,7 @@ document.addEventListener('submit',async function(e){
        toast('فشل حفظ الـ Agent في قاعدة البيانات: '+err.message,'err');
        save();closeModal();route();
      }
-   }else{save();closeModal();toast('تم حفظ الـ Agent','ok');route()}
+   }else{save();closeModal();toast('تم حفظ الـ Agent ✔','ok');route()}
    return}
  else if(f.id==='f-widget'){
    var nw=defWidget(fd.get('agentId'),String(fd.get('name')).trim());
@@ -1998,54 +1825,54 @@ document.addEventListener('submit',async function(e){
      });
    }else{save();closeModal();draft=null;go('#/app/builder?id='+nw.id)}
    return}
+ else if(f.id==='f-kb-url'){
+   var url=String(fd.get('url')).trim();
+   var agentIdU=fd.get('agentId')||'';
+   var d2={id:uid('kb_'),name:url,type:'url',agentId:agentIdU,content:'جارٍ الزحف واستخراج المعلومات...',status:'processing',chunks:[],createdAt:now()};
+   ws().kb.unshift(d2);save();closeModal();refreshKbUI();
+   processUrl(url,d2);
+   return}
+ else if(f.id==='f-kb-file'){
+   var fileIn=document.getElementById('kb-file2');
+   var file=fileIn?fileIn.files[0]:null;
+   if(!file){toast('اختر ملفًا أولًا','err');return}
+   var agentIdF=fd.get('agentId')||'';
+   closeModal();refreshKbUI();
+   processFile(file,agentIdF);
+   return}
+ else if(f.id==='f-kb-text'){
+   var content=String(fd.get('content')||'').trim();
+   if(!content){toast('اكتب المعلومات أولًا','err');return}
+   var title=String(fd.get('title')||'').trim()||content.slice(0,60);
+   var doc={id:uid('kb_'),name:title,type:'text',agentId:fd.get('agentId')||'',content:content,status:'ready',createdAt:now(),lastSync:now()};
+   chunkify(doc);
+   ws().kb.unshift(doc);save();closeModal();refreshKbUI();
+   toast('تم حفظ المصدر ✔ — '+doc.chunkCount+' مقطع (مصدر معرفة فقط)','ok');
+   return}
  else if(f.id==='f-kb-edit'){
    var docU=ws().kb.find(function(x){return x.id===fd.get('id')});
-   if(docU){docU.name=String(fd.get('title')).trim();docU.content=String(fd.get('content')).trim();chunkify(docU);docU.chunkCount=docU.chunks.length;docU.status='ready';docU.lastSync=now();save();closeModal();toast('تم حفظ المصدر وإعادة معالجته: '+docU.chunks.length+' مقطع','ok');route()}
+   if(docU){
+     var newContent=String(fd.get('content')||'').trim();
+     if(!newContent){toast('المحتوى لا يمكن أن يكون فارغًا','err');return}
+     docU.name=String(fd.get('title')||'').trim()||newContent.slice(0,60);
+     docU.content=newContent;chunkify(docU);docU.status='ready';docU.lastSync=now();
+     save();closeModal();refreshKbUI();toast('تم حفظ المصدر وإعادة معالجته: '+docU.chunkCount+' مقطع','ok');
+   }
    return}
  else if(f.id==='f-dash-msg'){var cd=ws().convos.find(function(x){return x.id===selConvo});if(!cd)return;
    var txt=String(fd.get('m')||'').trim();if(!txt)return;
    cd.messages.push({from:'team',text:txt,at:now()});cd.updatedAt=now();save();route()}
- else if(f.id==='f-kb-text'){
-   var doc={id:uid('kb_'),name:String(fd.get('title')).trim(),type:'text',agentId:fd.get('agentId')||'',content:String(fd.get('content')).trim(),status:'ready',createdAt:now(),lastSync:now()};
-   chunkify(doc);doc.chunkCount=doc.chunks.length;
-   ws().kb.unshift(doc);save();toast('تم حفظ المصدر: '+doc.chunks.length+' مقطع (مصدر معرفة فقط — لا معرفة عامة)','ok');route()}
- else if(f.id==='f-kb-url'){
-   var url=String(fd.get('url')).trim();
-   var agentIdU=fd.get('agentId')||'';
-   if(isRemote()&&cfg&&db.ws&&db.ws.__wid){
-     var d2={id:uid('kb_'),name:url,type:'url',agentId:agentIdU,content:'جارٍ زحف الموقع واستخراج المعلومات المفيدة...',status:'processing',chunks:[],createdAt:now()};
-     ws().kb.unshift(d2);save();route();
-     toast('جارٍ زحف الموقع على الخادم (حتى 10 صفحات ضمن نفس النطاق)...');
-     (async function(){
-       try{
-         var resp=await fetch(apiBase()+'/kb-crawl',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({url:url,doc_id:d2.id,workspace_id:db.ws.__wid,agent_id:agentIdU||null})});
-         var j=await resp.json().catch(function(){return{}});
-         if(!resp.ok||j.error)throw new Error(j.message||('فشل الزحف ('+resp.status+')'));
-         d2.content='تم زحف '+(j.pages||1)+' صفحة واستخراج '+(j.chunks||0)+' مقطعًا.';
-         d2.chunkCount=j.chunks||0;d2.pages=j.pages||1;d2.status='ready';d2.lastSync=now();
-         save();route();toast('تم الزحف والمعالجة ✔','ok');
-       }catch(err){
-         console.error(err);
-         d2.status='error';d2.content='فشل الزحف: '+err.message;
-         save();route();toast('فشل الزحف: '+err.message,'err');
-       }
-     })();
-   }else{
-     toast('الزحف الحقيقي يتطلب الاتصال بالخادم — اربط Supabase وانشر kb-crawl','err');
-   }
-   return}
  else if(f.id==='f-team'){ws().settings.team.push({email:String(fd.get('email')).trim(),role:'عضو'});save();toast('تمت دعوة العضو','ok');route()}
  }catch(err){console.error(err);toast('تعذر تنفيذ العملية','err')}
 });
 
-/* ================= Boot ================= */
-window.addEventListener('error',function(ev){
- console.error('AOWN runtime error:',ev.message);
-});
+/* ================= Boot (جلسة دائمة) ================= */
+window.addEventListener('error',function(ev){console.error('AOWN runtime error:',ev.message)});
 async function boot(){
  try{
   loadDB();
-  if(PROD&&!isRemote()){db.session=null;if(!db.demo)db.ws=null;persist()}
+  /* الوضع المحلي/التجريبي يبقى محفوظًا — لا يُمسح عند إعادة الفتح */
+  if(!isRemote()&&db.demo&&!db.ws){db.ws=starterKit();persist()}
   const c=sbClient();
   if(c){
     const s0=await c.auth.getSession();
@@ -2069,7 +1896,7 @@ async function boot(){
   route();
  }catch(err){
   console.error('Boot error:',err);
-  document.getElementById('app').innerHTML='<div class="p-16 text-center text-ink-300"><p class="mb-3">تعذر تشغيل التطبيق: '+esc(err.message||String(err))+'</p><p class="text-xs text-ink-500">غالبًا السبب: حجب الإنترنت داخل الـ Preview (Tailwind/Supabase CDN) أو حجب localStorage. جرّب فتح الملف مباشرة في المتصفح.</p><button onclick="location.hash=\'#/\'" class="btn-primary mt-4">إعادة المحاولة</button></div>';
+  document.getElementById('app').innerHTML='<div class="p-16 text-center text-ink-300"><p class="mb-3">تعذر تشغيل التطبيق: '+esc(err.message||String(err))+'</p><p class="text-xs text-ink-500">غالبًا السبب: حجب الإنترنت داخل الـ Preview (مكتبات CDN) أو حجب localStorage. جرّب فتح الملف مباشرة في المتصفح.</p><button onclick="location.hash=\'#/\'" class="btn-primary mt-4">إعادة المحاولة</button></div>';
  }
 }
 boot();
