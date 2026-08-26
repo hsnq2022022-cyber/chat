@@ -59,7 +59,7 @@ pre.codebox{direction:ltr;text-align:left;font-family:ui-monospace,Menlo,monospa
 .eng-tab.on{background:rgba(10,186,181,.12);border-color:rgba(10,186,181,.5);color:#4fdcd7}
 .btn-primary,.btn-ghost,.glass,.switch{box-sizing:border-box}
 .ob-next-active{box-shadow:0 4px 14px rgba(10,186,181,0.4)}
-.ob-spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(10,186,181,.3);border-top-color:#0ABAB5;border-radius:9999px;animation:obsp .8s linear infinite;vertical-align:middle}
+.ob-spin{display:inline-block;width:12px;height:12px;border:2px solid rgba(10,186,181,.3);border-top-color:#0ABAB5;border-radius:9999px;animation:obsp .8s linear infinite;vertical-align:middle}
 @keyframes obsp{to{transform:rotate(360deg)}}
 </style>
 </head>
@@ -68,7 +68,7 @@ pre.codebox{direction:ltr;text-align:left;font-family:ui-monospace,Menlo,monospa
 <div id="toasts" class="fixed bottom-5 left-5 z-[999] space-y-2"></div>
 <div id="modal-root"></div>
 
-<!-- ====== Server delivery sources (مرجع نشر — معروض في صفحة الخلفية) ====== -->
+<!-- ====== Server delivery sources (تُعرض في صفحة الخلفية — لا تعمل بدون نشرها) ====== -->
 <script type="text/plain" id="src-sql-ob">
 -- Onboarding: لا يلزم جدول جديد. حالة المعالج تُدار ضمن إعدادات مساحة العمل
 -- وتُحفظ تلقائيًا عبر save() مع استئناف تلقائي عند العودة.
@@ -81,6 +81,7 @@ supabase functions deploy ai-respond    --no-verify-jwt
 supabase functions deploy verify-widget --no-verify-jwt
 supabase functions deploy kb-process    --no-verify-jwt
 supabase functions deploy kb-crawl      --no-verify-jwt
+supabase functions deploy kb-ingest     --no-verify-jwt
 </script>
 <script type="text/plain" id="src-sql2">
 create extension if not exists vector;
@@ -119,12 +120,40 @@ create policy kb_files_member on storage.objects for all
 <script type="text/plain" id="src-sql3">
 alter table public.knowledge_chunks add column if not exists agent_id text;
 create index if not exists chunks_agent_idx on public.knowledge_chunks(agent_id);
+-- (استُبدلت في ترحيل المرحلة 4 بالدالة الصارمة — راجع تبويب «٤. العزل الصارم والتشخيص»)
+</script>
+<script type="text/plain" id="src-sql4">
+-- Awn AI — Phase 4: عزل صارم بين الوكلاء + أدوات تشخيص
+-- عزل صارم: كل وكيل يرى معرفته فقط. لا تسريب عبر agent_id الفارغ.
+-- المعرفة "المشتركة" تُكتب الآن بنسخة لكل وكيل عبر (kb-ingest / kb-process / kb-crawl)،
+-- لذلك لا حاجة لفتح agent_id IS NULL للجميع.
 create or replace function public.match_kb_chunks_agent(ws uuid, ag text, q vector, match_count int default 4)
 returns table (doc_id text, content text, similarity float) language sql stable as $$
   select c.doc_id, c.content, 1 - (c.embedding <=> q) as similarity
   from public.knowledge_chunks c
-  where c.workspace_id = ws and c.embedding is not null and (c.agent_id is null or c.agent_id = ag)
+  where c.workspace_id = ws and c.embedding is not null and c.agent_id = ag
   order by c.embedding <=> q limit match_count; $$;
+
+-- عرض تشخيصي (شغّله من SQL Editor بحساب مالك المشروع):
+create or replace view public.kb_diagnostics as
+select d.id as doc_id,
+       d.workspace_id,
+       d.data->>'name' as name,
+       d.data->>'type' as type,
+       d.data->>'status' as status,
+       d.data->>'agentId' as agent_id,
+       (select count(*) from public.knowledge_chunks c where c.doc_id = d.id) as chunks_total,
+       (select count(*) from public.knowledge_chunks c where c.doc_id = d.id and c.embedding is not null) as embeddings,
+       (select count(distinct c.agent_id) from public.knowledge_chunks c where c.doc_id = d.id) as agents_linked
+from public.knowledge_docs d;
+
+-- استعلامات تشخيصية سريعة:
+-- select count(*) from public.knowledge_docs;
+-- select count(*) from public.knowledge_chunks;
+-- select doc_id, count(*) from public.knowledge_chunks group by doc_id order by 2 desc;
+-- select agent_id, count(*) from public.knowledge_chunks group by agent_id;
+-- حذف مقاطع مصدر معيّن يدويًا:
+-- delete from public.knowledge_chunks where doc_id = 'DOC_ID';
 </script>
 <script type="text/plain" id="src-verify">
 // supabase/functions/verify-widget/index.ts
@@ -146,6 +175,7 @@ Deno.serve(async(req)=>{
   const {data:agentRow}=await admin.from("agents").select("data").eq("id",String(wd.agentId)).maybeSingle();
   const ad:any=agentRow?.data??{};
   const {data:wsRow}=await admin.from("workspaces").select("plan").eq("id",widgetRow.workspace_id).maybeSingle();
+  // إعدادات العرض فقط — لا تعليمات ولا أسرار
   return json({ok:true,widget_id,agent:{name:ad.name||"مساعدك الذكي",avatar:ad.avatar||""},settings:{
    name:wd.name||ad.name||"مساعدك الذكي",welcome:wd.welcome||ad.welcome||"أهلًا بك 👋",
    placeholder:wd.placeholder||"اكتب رسالتك...",offline:wd.offline||"نحن غير متصلين حاليًا.",
@@ -161,7 +191,7 @@ Deno.serve(async(req)=>{
 });
 </script>
 <script type="text/plain" id="src-ai">
-// supabase/functions/ai-respond/index.ts — Grounded AI + CRM
+// supabase/functions/ai-respond/index.ts — RAG كامل: تضمين السؤال → بحث متجهي → سياق → Gemini
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 const CORS={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, api-key, content-type","Access-Control-Allow-Methods":"POST, OPTIONS"};
@@ -216,17 +246,23 @@ Deno.serve(async(req)=>{
   const apiKey=Deno.env.get("GEMINI_API_KEY");
   if(!apiKey)return json({error:"server",message:"عذرًا، حصل خطأ مؤقت. حاول مرة ثانية."},500);
   const genAI=new GoogleGenerativeAI(apiKey);
+  // 1) تضمين السؤال
   const qVec=(await genAI.getGenerativeModel({model:"text-embedding-004"}).embedContent(text)).embedding.values as number[];
+  // 2) بحث متجهي في معرفة هذا الـ Agent فقط (عزل صارم)
   const {data:hits}=await admin.rpc("match_kb_chunks_agent",{ws:wsId,ag:agentId,q:qVec,match_count:4});
   const context=(hits||[]).filter((h:any)=>h.similarity>=0.55).map((h:any)=>h.content).join("\n---\n");
+  // 3) سياق المحادثة
   const history=(cd.messages||[]).slice(-10).filter((m:any)=>m.from==="visitor"||m.from==="ai")
    .map((m:any)=>({role:m.from==="visitor"?"user" as const:"model" as const,parts:[{text:String(m.text)}]}));
+  // 4) Prompt مُؤرَّض (Grounded) — لا اختراع، لا معرفة عامة تجارية
   const sys=[ad.instructions||"أنت مساعد خدمة عملاء.",
-   "أنت تعمل ضمن نطاق هذا النشاط فقط. أولوية المعلومات: التعليمات ثم قاعدة المعرفة ثم سياق المحادثة.",
-   "إذا لم تكن المعلومة موجودة في السياق فقل بوضوح إنك لا تملكها واعرض التحويل لموظف. لا تخمّن أبدًا.",
-   "ممنوع استخدام معلوماتك العامة للإجابة عن أسعار أو منتجات أو خدمات أو سياسات أو مواعيد خاصة بهذا النشاط.",
-   "أجب باختصار وبلغة العميل.",
-   context?"المعلومات الموثقة من قاعدة المعرفة (اعتمد عليها فقط):\n"+context:"لا توجد معلومات ذات صلة في قاعدة المعرفة. اعتذر بلباقة ولا تخترع إجابة."].join("\n\n");
+   "أنت مساعد خدمة عملاء لهذا النشاط فقط. لديك Knowledge Base موثوقة تم جلبها من مصادر صاحب الحساب.",
+   "يجب أن تعتمد على Knowledge Base عند الإجابة على المعلومات الخاصة بالنشاط التجاري.",
+   "لا تخترع معلومات غير موجودة في السياق. لا تستخدم معرفتك العامة لإعطاء معلومات تجارية غير موجودة:",
+   "ممنوع اختراع أسعار أو منتجات أو خدمات أو أوقات أو سياسات أو أرقام أو عروض أو معلومات الشركة.",
+   "إذا لم تجد الإجابة في Knowledge Base، قل بوضوح إن المعلومات غير متوفرة واعرض التحويل لموظف.",
+   "كن مختصرًا وطبيعيًا. احترم لغة المستخدم واللهجة المحددة للـ Agent.",
+   context?"المعلومات الموثقة من قاعدة المعرفة (اعتمد عليها فقط):\n"+context:"لا توجد معلومات ذات صلة في قاعدة المعرفة بخصوص هذا السؤال. اعتذر بلباقة ولا تخترع إجابة."].join("\n\n");
   const model=genAI.getGenerativeModel({model:ad.model||"gemini-2.5-flash-lite",systemInstruction:sys});
   const chat=model.startChat({history});
   const res=await chat.sendMessage(text);
@@ -247,6 +283,63 @@ Deno.serve(async(req)=>{
  }catch(err){console.error(err);return json({error:"server",message:"عذرًا، حصل خطأ مؤقت. حاول مرة ثانية."},500);}
 });
 </script>
+<script type="text/plain" id="src-ingest">
+// supabase/functions/kb-ingest/index.ts
+// يحفظ النصوص اليدوية كمعرفة حقيقية: تقسيم + تضمينات + عزل حسب الـ Agent.
+// يستقبل: { doc_id, text, agent_id, workspace_id } أو { doc_id, delete: true } للحذف الكامل.
+import { createClient } from "npm:@supabase/supabase-js@2";
+import { GoogleGenerativeAI } from "npm:@google/generative-ai";
+const json=(b,s=200)=>new Response(JSON.stringify(b),{status:s,headers:{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"}});
+function chunkText(text:string,size=800,overlap=100){const clean=text.replace(/\s+/g," ").trim();const out:string[]=[];for(let i=0;i<clean.length;i+=size-overlap){const c=clean.slice(i,i+size).trim();if(c.length>20)out.push(c);}return out;}
+Deno.serve(async(req)=>{
+ if(req.method==="OPTIONS")return new Response("ok",{headers:{"Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"*"}});
+ try{
+  const body=await req.json().catch(()=>({}));
+  const doc_id=body.doc_id;
+  if(!doc_id)return json({error:"bad_request",message:"طلب غير صالح."},400);
+  const admin=createClient(Deno.env.get("SUPABASE_URL")!,Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  const dr=await admin.from("knowledge_docs").select("*").eq("id",doc_id).maybeSingle();
+  const row:any=dr.data;const dd:any=(row&&row.data)||{};
+  const wsId=body.workspace_id||(row?row.workspace_id:null);
+  // وضع الحذف الكامل: مقاطع + مستند
+  if(body.delete===true){
+   const d1=await admin.from("knowledge_chunks").delete().eq("doc_id",doc_id);
+   if(d1.error)return json({error:"delete",message:"فشل حذف المقاطع: "+d1.error.message},500);
+   const d2=await admin.from("knowledge_docs").delete().eq("id",doc_id);
+   if(d2.error)return json({error:"delete",message:"فشل حذف المستند: "+d2.error.message},500);
+   return json({ok:true,deleted:true});
+  }
+  const text=String(body.text||"").trim();
+  if(!text)return json({error:"empty",message:"النص فارغ."},422);
+  // تحديد الـ Agent: من الطلب، وإلا من knowledge_docs.data.agentId
+  let agentId=body.agent_id||null;
+  if(!agentId)agentId=dd.agentId||null;
+  let targets:string[]=[];
+  if(agentId)targets=[agentId];
+  else{
+   const ar=await admin.from("agents").select("id").eq("workspace_id",wsId);
+   targets=(ar.data||[]).map((a:any)=>a.id);
+  }
+  if(!targets.length)return json({error:"no_agent",message:"لا يوجد Agent لربط المعرفة به. أنشئ Agent أولًا."},422);
+  const chunks=chunkText(text).slice(0,400);
+  const genAI=new GoogleGenerativeAI(Deno.env.get("GEMINI_API_KEY")!);
+  const embModel=genAI.getGenerativeModel({model:"text-embedding-004"});
+  await admin.from("knowledge_chunks").delete().eq("doc_id",doc_id);
+  const rows:any[]=[];
+  for(let i=0;i<chunks.length;i+=20){
+   const batch=chunks.slice(i,i+20);
+   const r=await embModel.batchEmbedContents(batch.map(c=>({content:c})));
+   r.embeddings.forEach((e:any,j:number)=>{targets.forEach(tg=>rows.push({workspace_id:wsId,doc_id,content:batch[j],embedding:e.values,agent_id:tg}));});
+  }
+  const ins=await admin.from("knowledge_chunks").insert(rows);
+  if(ins.error)return json({error:"insert",message:"فشل تخزين المقاطع: "+ins.error.message},500);
+  // تحديث الحالة إلى ready فقط بعد نجاح الإدخال الفعلي
+  if(row){dd.status="ready";dd.chunkCount=chunks.length;dd.lastSync=Date.now();dd.error="";
+   await admin.from("knowledge_docs").update({data:dd}).eq("id",doc_id);}
+  return json({ok:true,chunks:chunks.length});
+ }catch(err){console.error("kb-ingest error",err);return json({error:"server",message:"فشل حفظ المعرفة: "+(err?.message||String(err))},500);}
+});
+</script>
 <script type="text/plain" id="src-kbproc">
 // supabase/functions/kb-process/index.ts — يستقبل { doc_id, path, name, agent_id }
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -258,39 +351,51 @@ const json=(b,s=200)=>new Response(JSON.stringify(b),{status:s,headers:{"Content
 function chunkText(text:string,size=800,overlap=100){const clean=text.replace(/\s+/g," ").trim();const out:string[]=[];for(let i=0;i<clean.length;i+=size-overlap){const c=clean.slice(i,i+size).trim();if(c.length>20)out.push(c);}return out;}
 async function extractByType(name:string,buf:Uint8Array){
  const ext=(name.split(".").pop()||"").toLowerCase();
- if(ext==="pdf"){const pdf=await getDocumentProxy(buf.slice().buffer);const {text}=await extractText(pdf,{mergePages:true});return Array.isArray(text)?text.join("\n"):text;}
- if(ext==="docx")return (await mammoth.extractRawText({buffer:buf.slice().buffer})).value;
- if(ext==="csv"||ext==="txt")return new TextDecoder("utf-8").decode(buf);
- if(ext==="xlsx"||ext==="xls"){const wb=XLSX.read(buf.slice().buffer,{type:"array"});let out="";for(const sn of wb.SheetNames)out+="\n["+sn+"]\n"+XLSX.utils.sheet_to_csv(wb.Sheets[sn]);return out;}
+ try{
+  if(ext==="pdf"){const pdf=await getDocumentProxy(buf.slice().buffer);const {text}=await extractText(pdf,{mergePages:true});return Array.isArray(text)?text.join("\n"):text;}
+  if(ext==="docx")return (await mammoth.extractRawText({buffer:buf.slice().buffer})).value;
+  if(ext==="csv"||ext==="txt"||ext==="md")return new TextDecoder("utf-8").decode(buf);
+  if(ext==="xlsx"||ext==="xls"){const wb=XLSX.read(buf.slice().buffer,{type:"array"});let out="";for(const sn of wb.SheetNames)out+="\n["+sn+"]\n"+XLSX.utils.sheet_to_csv(wb.Sheets[sn]);return out;}
+ }catch(e:any){throw new Error("فشل استخراج النص من الملف ("+ext+"): "+(e?.message||String(e)));}
  throw new Error("نوع الملف غير مدعوم: "+ext);
 }
 Deno.serve(async(req)=>{
  if(req.method==="OPTIONS")return new Response("ok",{headers:{"Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"*"}});
  try{
   const {doc_id,path,agent_id}=await req.json().catch(()=>({}));
-  if(!doc_id||!path)return json({error:"bad_request"},400);
+  if(!doc_id||!path)return json({error:"bad_request",message:"طلب غير صالح."},400);
   const admin=createClient(Deno.env.get("SUPABASE_URL")!,Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   const {data:file,error:dlErr}=await admin.storage.from("kb-files").download(path);
-  if(dlErr||!file)return json({error:"download"},500);
+  if(dlErr||!file)return json({error:"download",message:"تعذر قراءة الملف من التخزين: "+(dlErr?.message||"")},500);
   const buf=new Uint8Array(await file.arrayBuffer());
   const text=await extractByType(path.split("/").pop()||"file",buf);
-  if(!text.trim())return json({error:"empty"},422);
-  const workspaceId=path.split("/")[0];
+  if(!text||!text.trim())return json({error:"empty",message:"الملف لا يحتوي نصًا قابلًا للاستخراج."},422);
+  // تحديد الـ Agent: من الطلب، وإلا من knowledge_docs.data.agentId (fallback آمن)
+  const dr=await admin.from("knowledge_docs").select("*").eq("id",doc_id).maybeSingle();
+  const row:any=dr.data;const dd:any=(row&&row.data)||{};
+  let agentId=agent_id||null;
+  if(!agentId)agentId=dd.agentId||null;
+  const wsId=row?row.workspace_id:null;
+  let targets:string[]=[];
+  if(agentId)targets=[agentId];
+  else{const ar=await admin.from("agents").select("id").eq("workspace_id",wsId);targets=(ar.data||[]).map((a:any)=>a.id);}
+  if(!targets.length)return json({error:"no_agent",message:"لا يوجد Agent لربط المعرفة به."},422);
   const chunks=chunkText(text).slice(0,400);
   const genAI=new GoogleGenerativeAI(Deno.env.get("GEMINI_API_KEY")!);
   const embModel=genAI.getGenerativeModel({model:"text-embedding-004"});
   await admin.from("knowledge_chunks").delete().eq("doc_id",doc_id);
   const rows:any[]=[];
-  for(let i=0;i<chunks.length;i+=20){const batch=chunks.slice(i,i+20);
+  for(let i=0;i<chunks.length;i+=20){
+   const batch=chunks.slice(i,i+20);
    const r=await embModel.batchEmbedContents(batch.map(c=>({content:c})));
-   r.embeddings.forEach((e,j)=>rows.push({workspace_id:workspaceId,doc_id,agent_id:agent_id||null,content:batch[j],embedding:e.values}));}
-  const {error:insErr}=await admin.from("knowledge_chunks").insert(rows);
-  if(insErr)return json({error:"insert",message:insErr.message},500);
-  const dr=await admin.from("knowledge_docs").select("*").eq("id",doc_id).maybeSingle();
-  if(dr.data){const dd:any=dr.data.data||{};dd.status="ready";dd.chunkCount=rows.length;dd.lastSync=Date.now();
+   r.embeddings.forEach((e:any,j:number)=>{targets.forEach(tg=>rows.push({workspace_id:wsId,doc_id,content:batch[j],embedding:e.values,agent_id:tg}));});
+  }
+  const ins=await admin.from("knowledge_chunks").insert(rows);
+  if(ins.error)return json({error:"insert",message:"فشل إنشاء التضمينات أو تخزين المقاطع: "+ins.error.message},500);
+  if(row){dd.status="ready";dd.chunkCount=chunks.length;dd.lastSync=Date.now();dd.error="";
    await admin.from("knowledge_docs").update({data:dd}).eq("id",doc_id);}
-  return json({ok:true,chunks:rows.length,summary:"تمت المعالجة وتخزين التضمينات."});
- }catch(err){console.error(err);return json({error:"server",message:"فشل في معالجة الملف: "+(err?.message||String(err))},500);}
+  return json({ok:true,chunks:chunks.length,summary:"تمت المعالجة وتخزين التضمينات."});
+ }catch(err){console.error("kb-process error",err);return json({error:"server",message:err?.message||"فشل في معالجة الملف."},500);}
 });
 </script>
 <script type="text/plain" id="src-crawl">
@@ -311,8 +416,8 @@ Deno.serve(async(req)=>{
  if(req.method==="OPTIONS")return new Response("ok",{headers:{"Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"*"}});
  try{
   const {url,doc_id,workspace_id,agent_id}=await req.json().catch(()=>({}));
-  if(!url||!doc_id||!workspace_id)return json({error:"bad_request"},400);
-  if(!/^https?:\/\//i.test(url))return json({error:"bad_url"},400);
+  if(!url||!doc_id)return json({error:"bad_request",message:"طلب غير صالح."},400);
+  if(!/^https?:\/\//i.test(url))return json({error:"bad_url",message:"الرابط يجب أن يبدأ بـ http أو https."},400);
   const origin=new URL(url).origin;
   const queue:string[]=[url];const visited=new Set<string>();const pages:string[]=[];
   while(queue.length&&visited.size<MAX_PAGES){
@@ -321,31 +426,43 @@ Deno.serve(async(req)=>{
    if(u.origin!==origin||visited.has(key))continue;
    visited.add(key);
    try{const res=await fetch(u.toString(),{headers:{"User-Agent":"AwnBot/1.0"},redirect:"follow",signal:AbortSignal.timeout(15000)});
-    if(!res.ok)continue;
+    if(!res.ok){console.warn("crawl page failed:",res.status,u.toString());continue;}
     const ct=res.headers.get("content-type")||"";
     if(!ct.includes("html"))continue;
     const {text,links}=extractPage(await res.text());
     if(text.length>40)pages.push("صفحة: "+u.pathname+"\n"+text.slice(0,20000));
     for(const l of links)queue.push(new URL(l,u.toString()).toString());
-   }catch{continue;}
+   }catch(fetchErr){console.warn("crawl fetch error:",fetchErr);continue;}
   }
-  if(!pages.length)return json({error:"empty",message:"لم يتم استخراج نص كافٍ من الموقع."},422);
+  if(!pages.length)return json({error:"empty",message:"الموقع لا يحتوي نصًا كافيًا — قد يعتمد على JavaScript في عرض المحتوى أو يمنع القراءة الآلية."},422);
+  // تحديد الـ Agent: من الطلب، وإلا من knowledge_docs.data.agentId
+  const dr=await admin2().from("knowledge_docs").select("*").eq("id",doc_id).maybeSingle();
+  function admin2(){return createClient(Deno.env.get("SUPABASE_URL")!,Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);}
+  const admin=admin2();
+  const row:any=dr.data;const dd:any=(row&&row.data)||{};
+  let agentId=agent_id||null;
+  if(!agentId)agentId=dd.agentId||null;
+  const wsId=workspace_id||(row?row.workspace_id:null);
+  let targets:string[]=[];
+  if(agentId)targets=[agentId];
+  else{const ar=await admin.from("agents").select("id").eq("workspace_id",wsId);targets=(ar.data||[]).map((a:any)=>a.id);}
+  if(!targets.length)return json({error:"no_agent",message:"لا يوجد Agent لربط المعرفة به."},422);
   const chunks=chunkText(pages.join("\n\n")).slice(0,600);
   const genAI=new GoogleGenerativeAI(Deno.env.get("GEMINI_API_KEY")!);
   const embModel=genAI.getGenerativeModel({model:"text-embedding-004"});
-  const admin=createClient(Deno.env.get("SUPABASE_URL")!,Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   await admin.from("knowledge_chunks").delete().eq("doc_id",doc_id);
   const rows:any[]=[];
-  for(let i=0;i<chunks.length;i+=20){const batch=chunks.slice(i,i+20);
+  for(let i=0;i<chunks.length;i+=20){
+   const batch=chunks.slice(i,i+20);
    const r=await embModel.batchEmbedContents(batch.map(c=>({content:c})));
-   r.embeddings.forEach((e,j)=>rows.push({workspace_id,doc_id,agent_id:agent_id||null,content:batch[j],embedding:e.values}));}
-  const {error:insErr}=await admin.from("knowledge_chunks").insert(rows);
-  if(insErr)return json({error:"insert",message:insErr.message},500);
-  const dr=await admin.from("knowledge_docs").select("*").eq("id",doc_id).maybeSingle();
-  if(dr.data){const dd:any=dr.data.data||{};dd.status="ready";dd.chunkCount=rows.length;dd.lastSync=Date.now();dd.pages=visited.size;
+   r.embeddings.forEach((e:any,j:number)=>{targets.forEach(tg=>rows.push({workspace_id:wsId,doc_id,content:batch[j],embedding:e.values,agent_id:tg}));});
+  }
+  const ins=await admin.from("knowledge_chunks").insert(rows);
+  if(ins.error)return json({error:"insert",message:"فشل تخزين المقاطع: "+ins.error.message},500);
+  if(row){dd.status="ready";dd.chunkCount=chunks.length;dd.lastSync=Date.now();dd.pages=visited.size;dd.error="";
    await admin.from("knowledge_docs").update({data:dd}).eq("id",doc_id);}
-  return json({ok:true,chunks:rows.length,pages:visited.size});
- }catch(err){console.error(err);return json({error:"server",message:"فشل الزحف: "+(err?.message||String(err))},500);}
+  return json({ok:true,chunks:chunks.length,pages:visited.size});
+ }catch(err){console.error("kb-crawl error",err);return json({error:"server",message:"فشل الزحف: "+(err?.message||String(err))},500);}
 });
 </script>
 <script type="text/plain" id="src-widgetjs">
@@ -381,6 +498,8 @@ const timeAgo=t=>{const d=now()-t;if(d<6e4)return 'الآن';if(d<36e5)return '�
 const hashPw=s=>{let h=9;for(const c of String(s))h=Math.imul(h^c.charCodeAt(0),387420489);return 'h'+(h^h>>>9)};
 const norm=s=>String(s||'').replace(/[\u064B-\u0652\u0640]/g,'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').toLowerCase();
 const tokens=s=>norm(s).split(/[^\u0600-\u06FFa-z0-9]+/).filter(w=>w.length>2);
+function fmtSize(b){if(b==null)return '';if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';return (b/1048576).toFixed(1)+' MB'}
+function arErr(m){m=String(m||'');if(/failed to fetch|networkerror|load failed/i.test(m))return 'تعذر الوصول إلى الخادم — تحقق من اتصال الإنترنت';if(/401|invalid api key|invalid key/i.test(m))return 'خطأ في مفتاح الاتصال بالخادم';return m}
 function md(s){let t=esc(s);t=t.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
  t=t.replace(/\[(.+?)\]\((.+?)\)/g,function(m,txt,rawUrl){const u=String(rawUrl||'').trim();
   if(/^https?:\/\//i.test(u))return '<a class="underline text-tiffany-400" target="_blank" rel="noopener noreferrer" href="'+u+'">'+txt+'</a>';return txt;});
@@ -443,6 +562,7 @@ pro:{name:'الاحترافي',price:299,agents:999,msgs:50000,feat:['Agents غ�
 const AI_MODELS=['gemini-2.5-flash-lite','gemini-2.5-flash','gemini-2.0-flash','gemini-1.5-pro'];
 const CLASSES=['استفسار عام','مهتم','عميل محتمل','مشتري','عميل حالي','يحتاج متابعة','غير مهتم'];
 const AUTO_TAGS=new Set(['سأل عن السعر','سأل عن التوصيل','سأل عن الدفع','نية شراء','طلب موظف']);
+const KB_STATUSES={pending:'بانتظار البدء',uploading:'جارٍ الرفع',processing:'جارٍ المعالجة',embedding:'جارٍ إنشاء التضمينات',ready:'جاهز',error:'فشل'};
 
 /* ================= Supabase ================= */
 let cfg=null;try{cfg=JSON.parse(lsGet('aown_cfg'))}catch(e){}
@@ -472,16 +592,15 @@ function defWidget(agentId,name){return {id:uid('w_'),agentId:agentId,name:name,
  online:true,typing:true,autoOpen:false,delay:3,badge:true,sound:false,mobile:'panel',createdAt:now()}}
 function chunkify(doc){doc.chunks=String(doc.content||'').split(/\n+/).map(function(s){return s.trim()}).filter(function(s){return s.length>3}).map(function(s){return {text:s,toks:tokens(s)}});doc.chunkCount=doc.chunks.length}
 
-/* بيانات البداية — لمسار الاستكشاف/التخطي فقط، ومعالج التهيئة يستبدلها ببيانات المستخدم الحقيقية */
 function starterKit(){
  const a1={id:uid('ag_'),__demo:true,name:'موظف المبيعات',desc:'يرد على استفسارات الزوار ويساعدهم في اختيار المنتجات والأسعار.',avatar:AVT[0],instructions:'أنت موظف مبيعات. أجب بإيجاز وود، ولا تذكر أسعارًا أو منتجات غير موجودة في قاعدة المعرفة.',language:'العربية',tone:'ودي واحترافي',model:'gemini-2.5-flash-lite',welcome:'أهلًا بك 👋 كيف أقدر أساعدك اليوم؟',fallback:'عذرًا، ما عندي معلومات عن هذا حاليًا. إذا حبيت أحولك لموظف.',createdAt:now()};
  const a2={id:uid('ag_'),__demo:true,name:'دعم العملاء',desc:'يتابع الطلبات وسياسات الشحن والاسترجاع ويصعّد الحالات الحساسة.',avatar:AVT[1],instructions:'أنت موظف دعم عملاء. التزم بالسياسات الموثقة فقط، وحوّل الحالات الغاضبة لموظف بشري.',language:'العربية',tone:'هادئ ومتعاطف',model:'gemini-2.5-flash-lite',welcome:'مرحبًا 🤍 أنا هنا لمساعدتك بأي استفسار.',fallback:'ما قدرت ألقى إجابة مؤكدة، خلني أحولك لفريق الدعم.',createdAt:now()};
  const w1=defWidget(a1.id,'ويدجت المتجر');w1.__demo=true;
  const w2=defWidget(a2.id,'ويدجت الدعم');w2.primary='#089e9a';w2.__demo=true;
  const kb=[
- {id:uid('kb_'),__demo:true,name:'المنتجات والأسعار',type:'text',agentId:a1.id,createdAt:now(),lastSync:now(),status:'ready',content:'سماعة بلوتوث برو بسعر 199 ريال.\nشاحن سريع 45 واط بسعر 89 ريال.\nحقيبة لابتوب مقاومة للماء بسعر 149 ريال.\nعرض الباندل: سماعة + شاحن بسعر 259 ريال.'},
- {id:uid('kb_'),__demo:true,name:'سياسة الشحن والتوصيل',type:'text',agentId:'',createdAt:now(),lastSync:now(),status:'ready',content:'التوصيل داخل الرياض خلال 24 ساعة برسوم 15 ريال.\nالشحن مجاني للطلبات فوق 200 ريال.\nباقي المدن من 2 إلى 4 أيام عمل.'},
- {id:uid('kb_'),__demo:true,name:'سياسة الاسترجاع',type:'text',agentId:'',createdAt:now(),lastSync:now(),status:'ready',content:'يمكن استرجاع المنتج خلال 14 يومًا بحالته الأصلية.\nيتم استرداد المبلغ خلال 5 إلى 7 أيام عمل.\nالمنتجات الشخصية غير قابلة للاسترجاع.'}];
+ {id:uid('kb_'),__demo:true,name:'المنتجات والأسعار',type:'text',agentId:a1.id,createdAt:now(),lastSync:now(),status:'ready',error:'',content:'سماعة بلوتوث برو بسعر 199 ريال.\nشاحن سريع 45 واط بسعر 89 ريال.\nحقيبة لابتوب مقاومة للماء بسعر 149 ريال.\nعرض الباندل: سماعة + شاحن بسعر 259 ريال.'},
+ {id:uid('kb_'),__demo:true,name:'سياسة الشحن والتوصيل',type:'text',agentId:'',createdAt:now(),lastSync:now(),status:'ready',error:'',content:'التوصيل داخل الرياض خلال 24 ساعة برسوم 15 ريال.\nالشحن مجاني للطلبات فوق 200 ريال.\nباقي المدن من 2 إلى 4 أيام عمل.'},
+ {id:uid('kb_'),__demo:true,name:'سياسة الاسترجاع',type:'text',agentId:'',createdAt:now(),lastSync:now(),status:'ready',error:'',content:'يمكن استرجاع المنتج خلال 14 يومًا بحالته الأصلية.\nيتم استرداد المبلغ خلال 5 إلى 7 أيام عمل.\nالمنتجات الشخصية غير قابلة للاسترجاع.'}];
  kb.forEach(chunkify);
  return {agents:[a1,a2],widgets:[w1,w2],kb:kb,contacts:[],convos:[],
   settings:{name:'مساحة عملي',type:'متجر إلكتروني',lang:'العربية',tz:'Asia/Riyadh',team:[],
@@ -594,7 +713,10 @@ async function getAIReply(text,agent,widget,convo){
  }
  return new Promise(function(resolve){setTimeout(function(){resolve(aiRespondLocal(text,agent,widget?widget.agentId:undefined))},700)});}
 
-/* ================= Knowledge processing ================= */
+/* ================================================================
+   Knowledge Processing — التدفق الحقيقي (بدون نجاح وهمي)
+   الحالات: pending → uploading → processing → embedding → ready | error
+   ================================================================ */
 function refreshKbUI(){var h=location.hash||'';if(h.indexOf('#/app/kb')===0||h.indexOf('#/onboarding')===0)route()}
 async function fetchPage(url){
  try{
@@ -607,10 +729,10 @@ async function fetchPage(url){
  }catch(e){
   const proxy='https://api.allorigins.win/get?url='+encodeURIComponent(url);
   const r2=await fetch(proxy);
-  if(!r2.ok)throw new Error('تعذر جلب الصفحة (قد يمنع الموقع القراءة الآلية)');
+  if(!r2.ok)throw new Error('تعذر الوصول إلى الموقع');
   const j=await r2.json().catch(function(){return null});
   if(j&&j.contents)return j.contents;
-  throw new Error('تعذر جلب محتوى الصفحة');}}
+  throw new Error('تعذر جلب محتوى الموقع');}}
 function extractHtml(html,baseUrl){
  const d=new DOMParser().parseFromString(html,'text/html');
  d.querySelectorAll('script,style,noscript,svg,iframe,nav,footer,form,button,header').forEach(function(n){n.remove()});
@@ -635,28 +757,27 @@ async function crawlLocal(url,doc){
    if(res.text.length>40)pages.push('صفحة: '+u.pathname+'\n'+res.text.slice(0,20000));
    res.links.forEach(function(l){queue.push(l)});
   }catch(e){/* تجاهل الصفحة الفاشلة وأكمل */}}
- if(!pages.length)throw new Error('لم يتم استخراج نص كافٍ من الموقع — تأكد أن الرابط صفحة HTML عامة');
+ if(!pages.length)throw new Error('الموقع لا يحتوي نصًا كافيًا — قد يعتمد على JavaScript في عرض المحتوى');
  doc.content=pages.join('\n\n').slice(0,60000);
  chunkify(doc);doc.pages=visited.size;doc.status='ready';doc.lastSync=now();}
 async function processUrl(url,doc){
- doc.status='processing';doc.content='جارٍ الزحف واستخراج المعلومات...';save();refreshKbUI();
+ doc.status='processing';doc.error='';doc.content='جارٍ الزحف واستخراج المعلومات...';save();refreshKbUI();
  try{
   if(isRemote()&&cfg&&apiBase()&&db.ws&&db.ws.__wid){
-   try{
-    const resp=await fetch(apiBase()+'/kb-crawl',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({url:url,doc_id:doc.id,workspace_id:db.ws.__wid,agent_id:doc.agentId||null})});
-    const j=await resp.json().catch(function(){return{}});
-    if(resp.ok&&j&&!j.error){
-     doc.status='ready';doc.chunkCount=j.chunks||0;doc.pages=j.pages||1;doc.lastSync=now();
-     doc.content='تم الزحف عبر الخادم — '+(j.pages||1)+' صفحة، '+(j.chunks||0)+' مقطعًا.';
-     save();refreshKbUI();toast('تم زحف الموقع ومعالجته ✔','ok');return;}
-    throw new Error((j&&j.message)||'فشل الزحف عبر الخادم');
-   }catch(errSrv){console.warn('خادم الزحف غير متاح — تحويل للمعالجة المحلية:',errSrv.message)}}
+   const resp=await fetch(apiBase()+'/kb-crawl',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({url:url,doc_id:doc.id,workspace_id:db.ws.__wid,agent_id:doc.agentId||null})});
+   const j=await resp.json().catch(function(){return null});
+   if(!resp.ok||!j||j.error)throw new Error(arErr((j&&j.message)||('فشل الزحف ('+resp.status+')')));
+   doc.status='ready';doc.chunkCount=j.chunks||0;doc.pages=j.pages||1;doc.lastSync=now();
+   doc.content='تم الزحف عبر الخادم — '+(j.pages||1)+' صفحة، '+(j.chunks||0)+' مقطعًا مع تضمينات دلالية.';
+   save();refreshKbUI();toast('تم زحف الموقع ومعالجته ✔','ok');return;
+  }
   await crawlLocal(url,doc);
   save();refreshKbUI();
   toast('تم استخراج معلومات الموقع ✔ — '+doc.chunkCount+' مقطع من '+(doc.pages||1)+' صفحة','ok');
  }catch(err){
-  doc.status='error';doc.content='فشل جلب الموقع: '+(err.message||err);
-  save();refreshKbUI();toast('فشل جلب الموقع: '+(err.message||err),'err');}}
+  console.error('KB crawl error:',err);
+  doc.status='error';doc.error=arErr(err.message||String(err));doc.content='فشل الزحف: '+doc.error;
+  save();refreshKbUI();toast('فشل الزحف: '+doc.error,'err');}}
 async function extractFileClient(file){
  const ext=(file.name.split('.').pop()||'').toLowerCase();
  if(ext==='txt'||ext==='csv'||ext==='md')return await file.text();
@@ -679,32 +800,77 @@ async function extractFileClient(file){
   let out='';wb.SheetNames.forEach(function(sn){out+='\n['+sn+']\n'+window.XLSX.utils.sheet_to_csv(wb.Sheets[sn])});return out;}
  throw new Error('نوع الملف غير مدعوم: '+ext);}
 async function processFile(file,agentId){
- const doc={id:uid('kb_'),name:file.name,type:'file',agentId:agentId,content:'جارٍ الاستخراج والمعالجة...',status:'processing',chunks:[],createdAt:now()};
+ const s=ws();
+ const doc={id:uid('kb_'),name:file.name,type:'file',agentId:agentId||'',content:'',status:'pending',chunks:[],chunkCount:0,createdAt:now(),size:file.size,error:'',storagePath:''};
+ s.kb.unshift(doc);save();refreshKbUI();
+ try{
+  if(isRemote()&&cfg&&apiBase()&&db.ws&&db.ws.__wid){
+   doc.status='uploading';save();refreshKbUI();
+   const c=sbClient();
+   const safe=file.name.replace(/[^\w.\-\u0600-\u06FF]+/g,'_');
+   const path=db.ws.__wid+'/'+doc.id+'/'+safe;
+   const up=await c.storage.from('kb-files').upload(path,file,{upsert:true});
+   if(up.error)throw new Error('فشل رفع الملف: '+up.error.message);
+   doc.storagePath=path;doc.status='processing';save();refreshKbUI();
+   const resp=await fetch(apiBase()+'/kb-process',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({doc_id:doc.id,path:path,name:file.name,agent_id:agentId||null,workspace_id:db.ws.__wid})});
+   const j=await resp.json().catch(function(){return null});
+   if(!resp.ok||!j||j.error)throw new Error(arErr((j&&j.message)||('فشل معالجة الملف ('+resp.status+')')));
+   if(!j.chunks)throw new Error('لم يتم استخراج أي نص من الملف');
+   doc.status='ready';doc.chunkCount=j.chunks;doc.lastSync=now();
+   doc.content='تم استخراج النص وإنشاء '+j.chunks+' مقطعًا مع تضمينات دلالية.';
+   save();refreshKbUI();toast('تمت معالجة الملف ✔ — '+j.chunks+' مقطع','ok');return;
+  }
+  doc.status='processing';save();refreshKbUI();
+  const text=await extractFileClient(file);
+  if(!text||!text.trim())throw new Error('الملف لا يحتوي نصًا قابلًا للاستخراج');
+  doc.content=text.slice(0,120000);chunkify(doc);doc.status='ready';doc.lastSync=now();
+  save();refreshKbUI();toast('تمت معالجة الملف محليًا ✔ — '+doc.chunkCount+' مقطع','ok');
+ }catch(err){
+  console.error('KB file error:',err);
+  doc.status='error';doc.error=arErr(err.message||String(err));doc.content='فشلت المعالجة: '+doc.error;
+  save();refreshKbUI();toast(doc.error,'err');}}
+async function processTextDoc(title,content,agentId){
+ const doc={id:uid('kb_'),name:title||content.slice(0,60),type:'text',agentId:agentId||'',content:content,status:'processing',chunks:[],chunkCount:0,createdAt:now(),error:''};
  ws().kb.unshift(doc);save();refreshKbUI();
  try{
   if(isRemote()&&cfg&&apiBase()&&db.ws&&db.ws.__wid){
-   try{
-    const c=sbClient();
-    const safe=file.name.replace(/[^\w.\-\u0600-\u06FF]+/g,'_');
-    const path=db.ws.__wid+'/'+doc.id+'/'+safe;
-    const up=await c.storage.from('kb-files').upload(path,file,{upsert:true});
-    if(up.error)throw up.error;
-    const resp=await fetch(apiBase()+'/kb-process',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({doc_id:doc.id,path:path,name:file.name,agent_id:agentId||null})});
-    const j=await resp.json().catch(function(){return{}});
-    if(resp.ok&&j&&!j.error){
-     doc.content=j.summary||'تمت المعالجة عبر الخادم.';doc.chunkCount=j.chunks||0;doc.status='ready';doc.lastSync=now();
-     save();refreshKbUI();toast('تمت معالجة الملف عبر الخادم ✔','ok');return;}
-    throw new Error((j&&j.message)||'فشل الخادم');
-   }catch(errSrv){console.warn('خادم الملفات غير متاح — تحويل للمعالجة المحلية:',errSrv.message)}}
-  const text=await extractFileClient(file);
-  if(!text||!text.trim())throw new Error('الملف لا يحتوي نصًا قابلًا للاستخراج');
-  doc.content=text.slice(0,120000);
+   const resp=await fetch(apiBase()+'/kb-ingest',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({doc_id:doc.id,text:content,agent_id:agentId||null,workspace_id:db.ws.__wid})});
+   const j=await resp.json().catch(function(){return null});
+   if(!resp.ok||!j||j.error)throw new Error(arErr((j&&j.message)||('فشل حفظ المعرفة ('+resp.status+')')));
+   doc.status='ready';doc.chunkCount=j.chunks||0;doc.lastSync=now();
+   save();refreshKbUI();toast('تم حفظ المعرفة ✔ — '+doc.chunkCount+' مقطع','ok');return true;
+  }
   chunkify(doc);doc.status='ready';doc.lastSync=now();
-  save();refreshKbUI();
-  toast('تمت معالجة الملف ✔ — '+doc.chunkCount+' مقطع','ok');
+  save();refreshKbUI();toast('تم حفظ المعرفة محليًا ✔ — '+doc.chunkCount+' مقطع','ok');return true;
  }catch(err){
-  doc.status='error';doc.content='فشلت المعالجة: '+(err.message||err);
-  save();refreshKbUI();toast('فشلت معالجة الملف: '+(err.message||err),'err');}}
+  console.error('KB text error:',err);
+  doc.status='error';doc.error=arErr(err.message||String(err));
+  save();refreshKbUI();toast('فشل حفظ المعرفة: '+doc.error,'err');return false;}}
+async function reIngestDoc(doc){
+ doc.status='processing';doc.error='';save();refreshKbUI();
+ try{
+  if(isRemote()&&cfg&&apiBase()&&db.ws&&db.ws.__wid){
+   const resp=await fetch(apiBase()+'/kb-ingest',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({doc_id:doc.id,text:doc.content,agent_id:doc.agentId||null,workspace_id:db.ws.__wid})});
+   const j=await resp.json().catch(function(){return null});
+   if(!resp.ok||!j||j.error)throw new Error(arErr((j&&j.message)||('فشل إعادة المعالجة ('+resp.status+')')));
+   doc.status='ready';doc.chunkCount=j.chunks||0;doc.lastSync=now();
+   save();refreshKbUI();toast('تمت إعادة المعالجة ✔','ok');return;
+  }
+  chunkify(doc);doc.status='ready';doc.lastSync=now();save();refreshKbUI();toast('تمت إعادة المعالجة محليًا ✔','ok');
+ }catch(err){console.error(err);doc.status='error';doc.error=arErr(err.message||String(err));save();refreshKbUI();toast('فشلت إعادة المعالجة: '+doc.error,'err');}}
+async function reProcessFile(doc){
+ if(!doc.storagePath){toast('لا يوجد ملف مرفوع لهذا المصدر — ارفع الملف من جديد','err');return}
+ doc.status='processing';doc.error='';save();refreshKbUI();
+ try{
+  if(isRemote()&&cfg&&apiBase()&&db.ws&&db.ws.__wid){
+   const resp=await fetch(apiBase()+'/kb-process',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({doc_id:doc.id,path:doc.storagePath,name:doc.name,agent_id:doc.agentId||null,workspace_id:db.ws.__wid})});
+   const j=await resp.json().catch(function(){return null});
+   if(!resp.ok||!j||j.error)throw new Error(arErr((j&&j.message)||('فشل المعالجة ('+resp.status+')')));
+   doc.status='ready';doc.chunkCount=j.chunks||0;doc.lastSync=now();doc.content='تم استخراج النص وإنشاء '+(j.chunks||0)+' مقطعًا.';
+   save();refreshKbUI();toast('تمت إعادة المعالجة ✔','ok');return;
+  }
+  doc.status='error';doc.error='إعادة معالجة الملفات تتطلب الاتصال بالخادم';save();refreshKbUI();toast(doc.error,'err');
+ }catch(err){console.error(err);doc.status='error';doc.error=arErr(err.message||String(err));save();refreshKbUI();toast('فشلت إعادة المعالجة: '+doc.error,'err');}}
 
 /* ================= Widget UI ================= */
 function widgetMarkup(w,agent,opts){
@@ -871,13 +1037,13 @@ function renderAuth(mode){
 
 /* ================= Setup ================= */
 var engTab='secrets';
-var ENG_TABS=[['secrets','١. المفاتيح والنشر'],['sql2','٢. ترحيل قاعدة البيانات'],['sql3','٣. عزل المعرفة'],['sql-ob','Onboarding SQL'],['ai','ai-respond'],['verify','verify-widget'],['kbproc','kb-process'],['crawl','kb-crawl'],['widgetjs','widget.js'],['steps','خطوات النشر']];
-var ENG_SRC={secrets:'src-secrets',sql2:'src-sql2',sql3:'src-sql3','sql-ob':'src-sql-ob',ai:'src-ai',verify:'src-verify',kbproc:'src-kbproc',crawl:'src-crawl',widgetjs:'src-widgetjs'};
+var ENG_TABS=[['secrets','١. المفاتيح والنشر'],['sql2','٢. ترحيل قاعدة البيانات'],['sql3','٣. عمود agent_id'],['sql4','٤. العزل الصارم والتشخيص'],['ingest','kb-ingest'],['ai','ai-respond'],['verify','verify-widget'],['kbproc','kb-process'],['crawl','kb-crawl'],['widgetjs','widget.js'],['steps','خطوات النشر']];
+var ENG_SRC={secrets:'src-secrets',sql2:'src-sql2',sql3:'src-sql3',sql4:'src-sql4',ingest:'src-ingest',ai:'src-ai',verify:'src-verify',kbproc:'src-kbproc',crawl:'src-crawl',widgetjs:'src-widgetjs'};
 function engSource(k){var el=document.getElementById(ENG_SRC[k]);return el?el.textContent.trim():''}
-var ENG_STEPS='<ol class="list-decimal pr-5 space-y-3 text-sm text-ink-300 leading-7"><li>شغّل ترحيل المرحلة 2 ثم المرحلة 3 في SQL Editor.</li><li>انسخ ملفات الدوال الأربع إلى مجلدات <span class="ltr">supabase/functions</span> وانشرها.</li><li>ثبّت السر: <span class="ltr">supabase secrets set GEMINI_API_KEY=...</span></li><li>ارفع <span class="ltr">widget.js</span> على CDN واستبدل مصدر السكربت في كود التضمين.</li><li>أنشئ حسابًا جديدًا — سيفتح معالج التهيئة تلقائيًا ويبني وكيلًا حقيقيًا من بيانات نشاطك.</li><li>زحف المواقع ورفع الملفات يعملان داخل المتصفح أيضًا، وتُستخدم دوال الخادم عند توفرها للتضمينات الدلالية.</li></ol>';
+var ENG_STEPS='<ol class="list-decimal pr-5 space-y-3 text-sm text-ink-300 leading-7"><li>شغّل ترحيل المرحلة 2 ثم «عمود agent_id» ثم «٤. العزل الصارم والتشخيص» في SQL Editor.</li><li>انشر الدوال الخمس (ai-respond، verify-widget، kb-process، kb-crawl، kb-ingest) بعد نسخها إلى مجلدات <span class="ltr">supabase/functions</span>.</li><li>ثبّت السر: <span class="ltr">supabase secrets set GEMINI_API_KEY=...</span></li><li>ارفع <span class="ltr">widget.js</span> على CDN واستبدل مصدر السكربت في كود التضمين.</li><li>جرّب من صفحة Knowledge Base: ملف + نص يدوي + رابط موقع — وتابع الحالات الحقيقية (رفع → معالجة → تضمينات → جاهز).</li><li>استعلم عن <span class="ltr">kb_diagnostics</span> من SQL Editor للتحقق من عدد المقاطع والتضمينات لكل مستند.</li></ol>';
 function renderSetup(){
  var connected=isRemote();
- var phases=[['Supabase + قاعدة البيانات + RLS',true],['حفظ الودجات/الوكلاء مباشرة في Supabase',true],['widget.js + verify-widget + ai-respond',true],['Knowledge Base: زحف + ملفات + نصوص (تعمل فعليًا)',true],['عزل المعرفة لكل Agent + Grounded AI',true],['CRM: تصنيف + Lead Score + وسوم تلقائية',true],['معالج تهيئة (Onboarding) من 8 خطوات',true],['Billing + دفع حقيقي + إشعارات بريد',false]];
+ var phases=[['Supabase + قاعدة البيانات + RLS',true],['حفظ الودجات/الوكلاء مباشرة في Supabase',true],['widget.js + verify-widget + ai-respond (RAG)',true],['Knowledge Base: زحف + ملفات + نصوص (تدفق حقيقي بالحالات)',true],['عزل المعرفة لكل Agent + منع الإجابات العامة',true],['CRM: تصنيف + Lead Score + وسوم تلقائية',true],['معالج تهيئة (Onboarding) من 8 خطوات',true],['Billing + دفع حقيقي + إشعارات بريد',false]];
  document.getElementById('app').innerHTML='<div class="min-h-screen max-w-4xl mx-auto px-4 py-10">'
  +'<div class="flex items-center justify-between mb-8 flex-wrap gap-3"><a href="#/" class="flex items-center gap-2 font-display font-extrabold text-lg">'+logoSVG()+' عون AI</a><div class="flex gap-2">'+(me()?'<button data-action="go" data-to="#/app" class="btn-ghost !py-2 text-sm">لوحة التحكم</button>':'')+'<a href="#/" class="btn-ghost !py-2 text-sm">الرئيسية</a></div></div>'
  +'<h1 class="font-display font-extrabold text-3xl mb-2">الخلفية والمحرك</h1>'
@@ -889,7 +1055,7 @@ function renderSetup(){
  +'<div class="glass rounded-2xl p-6"><div class="flex items-center justify-between mb-4 flex-wrap gap-2"><h3 class="font-display font-bold flex items-center gap-2">'+icon('bolt','w-5 h-5 text-tiffany-400')+' ملفات التنفيذ</h3><span class="text-[11px] text-tiffany-300 bg-tiffany-500/10 border border-tiffany-500/30 rounded-full px-3 py-1">جاهزة للنشر</span></div>'
  +'<div class="flex flex-wrap gap-2 mb-4">'+ENG_TABS.map(function(t){return '<button data-action="eng-tab" data-id="'+t[0]+'" class="eng-tab '+(engTab===t[0]?'on':'')+'">'+t[1]+'</button>'}).join('')+'</div><div id="eng-view"></div></div></div>'
  +'<div class="space-y-5"><div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">مراحل الإطلاق</h3><div class="space-y-2.5">'+phases.map(function(p,i){return '<div class="flex items-center gap-2.5 text-sm"><span class="w-6 h-6 rounded-full flex items-center justify-center text-[11px] flex-none '+(p[1]?'bg-tiffany-500 text-ink-950 font-bold':'bg-ink-800 text-ink-500')+'">'+(i+1)+'</span><span class="'+(p[1]?'text-ink-100':'text-ink-500')+'">'+p[0]+'</span>'+(p[1]?'<span class="mr-auto text-tiffany-400 flex-none">'+icon('check','w-4 h-4')+'</span>':'')+'</div>'}).join('')+'</div></div>'
- +'<div class="glass rounded-2xl p-6 text-xs text-ink-400 leading-6 space-y-2"><p><b class="text-ink-200">سلسلة الأمان (ملزمة في كل الدوال)</b></p><p>widget_id → موجود → التوكن يطابق data.token → مفعّل → الـ Agent المرتبط بالسجل نفسه → معرفة ذلك الـ Agent فقط.</p><p>لا يُقبل أي agent_id أو workspace_id من المتصفح إطلاقًا.</p></div></div></div>'
+ +'<div class="glass rounded-2xl p-6 text-xs text-ink-400 leading-6 space-y-2"><p><b class="text-ink-200">سلسلة الأمان (ملزمة في كل الدوال)</b></p><p>widget_id → موجود → التوكن يطابق data.token → مفعّل → الـ Agent المرتبط بالسجل نفسه → معرفة ذلك الـ Agent فقط.</p><p>لا يُقبل أي agent_id أو workspace_id من المتصفح إطلاقًا. لا تصل أي مفاتيح أسرار إلى الويدجت.</p></div></div></div>'
  +'<div id="sb-status" class="mt-5"></div></div>';
  fillEngView();}
 function fillEngView(){
@@ -959,7 +1125,6 @@ function renderOnboardingPreview(step) {
    </div>
    ${step >= 6 ? `<div class="mt-3 text-[11px] text-ink-400 italic">"${esc(name)} يجهّز وكيله الذكي الأول..."</div>` : ''}
   </div>`;}
-/* البناء الحقيقي: وكيل + ويدجت حقيقيان (مع منع التكرار عبر علم البناء) */
 async function obBuildAgent(){
  const s=ws();const st=s.settings;
  if(st.obBuilt)return;
@@ -1042,13 +1207,13 @@ function renderOnboarding(){
   sub='حط رابط صفحة وحدة ونقراها تلقائياً، أو ارفع ملف، أو اكتب بنفسك.';
   const sources=s.kb.filter(function(k){return !k.__demo});
   body='<div class="space-y-5">'
-  +'<form id="f-kb-url" class="glass rounded-xl p-4 space-y-2"><div class="text-xs text-ink-400 flex items-center gap-2">'+icon('globe','w-4 h-4 text-tiffany-400')+' رابط موقع (زحف حقيقي حتى 10 صفحات)</div><div class="flex gap-2"><input name="url" type="url" required class="inp-s ltr" placeholder="https://example.com"><button class="btn-ghost !px-4 flex-none">قراءة</button></div></form>'
-  +'<form id="f-kb-file" class="glass rounded-xl p-4 space-y-2"><div class="text-xs text-ink-400 flex items-center gap-2">'+icon('doc','w-4 h-4 text-tiffany-400')+' ملف (PDF / DOCX / TXT / CSV / XLSX)</div><div class="flex gap-2"><input id="kb-file2" type="file" required accept=".pdf,.txt,.docx,.csv,.xlsx,.md" class="inp-s"><button class="btn-ghost !px-4 flex-none">رفع</button></div></form>'
-  +'<form id="f-kb-text" class="glass rounded-xl p-4 space-y-2"><div class="text-xs text-ink-400 flex items-center gap-2">'+icon('edit','w-4 h-4 text-tiffany-400')+' نص يدوي (مصدر معرفة فقط)</div><textarea name="content" rows="3" required class="inp-s" placeholder="مثال: كيك شوكولاتة — السعر: 20,000 دينار"></textarea><div class="flex gap-2"><input name="title" class="inp-s" placeholder="العنوان (اختياري)"><button class="btn-ghost !px-4 flex-none">حفظ</button></div></form>'
+  +'<div class="grid grid-cols-3 gap-3">'
+  +'<button data-action="kb-open" data-id="url" class="glass rounded-xl p-4 text-center hover:border-tiffany-500/50 transition border border-transparent"><div class="mb-1 text-tiffany-400 flex justify-center">'+icon('globe','w-6 h-6')+'</div><div class="text-sm font-bold">رابط موقع</div></button>'
+  +'<button data-action="kb-open" data-id="file" class="glass rounded-xl p-4 text-center hover:border-tiffany-500/50 transition border border-transparent"><div class="mb-1 text-tiffany-400 flex justify-center">'+icon('doc','w-6 h-6')+'</div><div class="text-sm font-bold">ملف</div></button>'
+  +'<button data-action="kb-open" data-id="text" class="glass rounded-xl p-4 text-center hover:border-tiffany-500/50 transition border border-transparent"><div class="mb-1 text-tiffany-400 flex justify-center">'+icon('edit','w-6 h-6')+'</div><div class="text-sm font-bold">نص يدوي</div></button></div>'
   +'<div><div class="text-xs text-ink-500 mb-2">مصادرك الحالية ('+sources.length+') — ستُربط بوكيلك تلقائيًا في خطوة البناء:</div><div class="space-y-2">'
   +(sources.map(function(k){
-   return '<div class="glass rounded-xl p-3 flex items-center gap-3"><span class="w-8 h-8 rounded-lg bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center flex-none">'+icon(k.type==='url'?'globe':k.type==='file'?'doc':'edit','w-4 h-4')+'</span><div class="flex-1 min-w-0"><div class="text-xs font-semibold truncate">'+esc(k.name)+'</div><div class="text-[10px] text-ink-500">'+(k.chunkCount||0)+' مقطع'+(k.lastSync?' • آخر تحديث '+timeAgo(k.lastSync):'')+'</div></div>'
-   +(k.status==='processing'?'<span class="text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5 flex-none"><span class="ob-spin"></span> جاري التحميل</span>':k.status==='error'?'<span class="text-[10px] bg-red-500/15 text-red-300 border border-red-500/30 rounded-full px-2 py-0.5 flex-none">فشل</span>':'<span class="text-[10px] bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 rounded-full px-2 py-0.5 flex-none">تمت المعالجة ✓</span>')+'</div>'}).join('')||'<div class="text-[11px] text-ink-600">لا مصادر بعد.</div>')+'</div></div></div>';}
+   return '<div class="glass rounded-xl p-3 flex items-center gap-3"><span class="w-8 h-8 rounded-lg bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center flex-none">'+icon(k.type==='url'?'globe':k.type==='file'?'doc':'edit','w-4 h-4')+'</span><div class="flex-1 min-w-0"><div class="text-xs font-semibold truncate">'+esc(k.name)+'</div><div class="text-[10px] text-ink-500">'+(k.chunkCount||0)+' مقطع'+(k.lastSync?' • آخر تحديث '+timeAgo(k.lastSync):'')+'</div></div>'+kbStatusBadge(k)+'</div>'}).join('')||'<div class="text-[11px] text-ink-600">لا مصادر بعد.</div>')+'</div></div></div>';}
  else if(step===5){
   title='هذا اللي تعلّمه وكيلك';
   sub='';
@@ -1129,7 +1294,6 @@ function statCard(ic,label,val,sub){return '<div class="glass rounded-2xl p-5"><
 function renderDash(h){
  var seg=(h.split('?')[0].match(/#\/app\/?([\w-]*)/)||[,''])[1];
  var page=PAGES[seg]||'home';
- /* حارس التهيئة: من لم يكمل المعالج يُوجّه إليه عند محاولة فتح الصفحة الرئيسية */
  if(page==='home'&&ws()&&ws().settings.onboarded!==true){go('#/onboarding');return}
  var titles={home:'الرئيسية',convos:'المحادثات',agents:'AI Agents',widgets:'Widgets',builder:'Widget Builder',contacts:'العملاء',kb:'Knowledge Base',analytics:'التحليلات',settings:'الإعدادات',billing:'الاشتراك'};
  var body='';
@@ -1260,27 +1424,83 @@ function pgContacts(){
   var tags=(c.tags||[]).map(function(t){return '<span class="text-[10px] bg-tiffany-500/10 text-tiffany-300 border border-tiffany-500/30 rounded-full px-2 py-0.5">'+esc(t)+'</span>'}).join('');
   return '<tr class="border-b border-ink-850 hover:bg-ink-850/60"><td class="px-4 py-3"><div class="flex items-center gap-3"><div class="w-9 h-9 rounded-full bg-tiffany-500/10 text-tiffany-300 flex items-center justify-center font-bold flex-none">'+esc((c.name||'ز').charAt(0))+'</div><div><b>'+esc(c.name||'زائر')+'</b><div class="text-[11px] text-ink-500 ltr">'+esc(c.vid||'')+'</div></div></div></td><td class="px-4 py-3 text-ink-400 text-xs">'+(esc(c.email)||'—')+'<br>'+esc(c.phone||'')+'</td><td class="px-4 py-3">'+classBadge(c.class)+'</td><td class="px-4 py-3"><div class="flex items-center gap-2"><b class="text-sm">'+(c.leadScore||0)+'</b><div class="w-16 h-1.5 bg-ink-800 rounded-full overflow-hidden"><div class="h-full bg-tiffany-500" style="width:'+(c.leadScore||0)+'%"></div></div></div></td><td class="px-4 py-3 text-ink-400 text-xs">'+timeAgo(c.lastSeen||now())+'</td><td class="px-4 py-3">'+w.convos.filter(function(x){return x.contactId===c.id}).length+'</td><td class="px-4 py-3"><div class="flex flex-wrap gap-1 items-center max-w-[180px]">'+tags+'<button data-action="add-tag" data-id="'+c.id+'" class="text-[10px] text-ink-500 hover:text-tiffany-300">+ وسم</button></div></td><td class="px-4 py-3"><div class="flex gap-1"><button data-action="note" data-id="'+c.id+'" class="btn-ghost !py-1 !px-2.5 text-[11px]">ملاحظات</button><button data-action="del-contact" data-id="'+c.id+'" class="p-1.5 text-red-400 hover:bg-red-500/10 rounded-lg">'+icon('trash','w-3.5 h-3.5')+'</button></div></td></tr>'}).join('');
  return '<div class="glass rounded-2xl overflow-x-auto"><table class="w-full text-sm min-w-[900px]"><thead class="text-ink-500 text-xs border-b border-ink-800"><tr>'+['العميل','التواصل','التصنيف','Lead Score','آخر نشاط','محادثات','وسوم',''].map(function(hh){return '<th class="text-right px-4 py-3 font-medium">'+hh+'</th>'}).join('')+'</tr></thead><tbody>'+(rows||'<tr><td colspan="8" class="p-10 text-center text-ink-500">لا عملاء بعد — يُنشأ العميل تلقائيًا مع أول محادثة من الويدجت.</td></tr>')+'</tbody></table></div>';}
-function agentOptions(sel){return '<option value="">مشترك — كل الوكلاء</option>'+ws().agents.map(function(a){return '<option value="'+a.id+'"'+(sel===a.id?' selected':'')+'>'+esc(a.name)+'</option>'}).join('')}
+function agentOptions(sel){return '<option value="">مشترك — كل الوكلاء (يُنسخ لكل وكيل)</option>'+ws().agents.map(function(a){return '<option value="'+a.id+'"'+(sel===a.id?' selected':'')+'>'+esc(a.name)+'</option>'}).join('')}
 function kbStatusBadge(k){
- if(k.status==='processing')return '<span class="text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5 flex-none">جاري التحميل...</span>';
- if(k.status==='error')return '<span class="text-[10px] bg-red-500/15 text-red-300 border border-red-500/30 rounded-full px-2 py-0.5 flex-none">فشل</span>';
- return '<span class="text-[10px] bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 rounded-full px-2 py-0.5 flex-none">'+(k.type==='url'?'متزامن':'تمت المعالجة')+'</span>';}
-var kbTab='url';
-function kbTabView(){
- if(kbTab==='url')return '<form id="f-kb-url" class="space-y-3"><label class="lbl2">رابط الموقع (يزحف حتى 10 صفحات ضمن نفس النطاق)<input name="url" type="url" required class="inp-s ltr" placeholder="https://example.com"></label><label class="lbl2">الـ Agent المرتبط (عزل المعرفة)<select name="agentId" class="inp-s">'+agentOptions('')+'</select></label><button class="btn-primary w-full">إضافة ومزامنة الآن</button></form>';
- if(kbTab==='file')return '<form id="f-kb-file" class="space-y-3"><label class="lbl2">ملف (PDF / DOCX / TXT / CSV / XLSX)<input id="kb-file2" type="file" required accept=".pdf,.txt,.docx,.csv,.xlsx,.md" class="inp-s"></label><label class="lbl2">الـ Agent المرتبط (عزل المعرفة)<select name="agentId" class="inp-s">'+agentOptions('')+'</select></label><button class="btn-primary w-full">رفع ومعالجة</button></form>';
- return '<form id="f-kb-text" class="space-y-3"><label class="lbl2">المعلومات (مصدر معرفة فقط — الـ AI يجيب منها حصرًا)<textarea name="content" rows="6" required class="inp-s" placeholder="مثال: كيك شوكولاتة — السعر: 20,000 دينار"></textarea></label><label class="lbl2">العنوان (اختياري — يُستنتج تلقائيًا إن تركته فارغًا)<input name="title" class="inp-s" placeholder="معلومات المنتجات"></label><label class="lbl2">الـ Agent المرتبط (عزل المعرفة)<select name="agentId" class="inp-s">'+agentOptions('')+'</select></label><button class="btn-primary w-full">حفظ ومعالجة</button></form>';}
-function kbAddModal(){
- modal('<h3 class="font-display font-bold text-lg mb-1">'+icon('plus','w-5 h-5 inline text-tiffany-400')+' إضافة مصدر معرفة</h3><p class="text-xs text-ink-500 mb-4">اختر نوع المصدر — تتم المعالجة تلقائيًا ويظهر عدد المقاطع فور انتهائها.</p><div class="flex gap-2 mb-4"><button type="button" data-action="kb-tab" data-id="url" class="eng-tab '+(kbTab==='url'?'on':'')+'">🌐 رابط موقع</button><button type="button" data-action="kb-tab" data-id="file" class="eng-tab '+(kbTab==='file'?'on':'')+'">📄 ملف</button><button type="button" data-action="kb-tab" data-id="text" class="eng-tab '+(kbTab==='text'?'on':'')+'">✍️ نص يدوي</button></div><div id="kb-tab-view">'+kbTabView()+'</div>');}
+ var act=['pending','uploading','processing','embedding'];
+ if(act.indexOf(k.status)>-1)return '<span class="text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5 inline-flex items-center gap-1 flex-none"><span class="ob-spin"></span> '+(KB_STATUSES[k.status]||'جارٍ المعالجة')+'</span>';
+ if(k.status==='error')return '<span class="text-[10px] bg-red-500/15 text-red-300 border border-red-500/30 rounded-full px-2 py-0.5 flex-none" title="'+esc(k.error||'')+'">فشل</span>';
+ return '<span class="text-[10px] bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 rounded-full px-2 py-0.5 flex-none">'+(k.type==='url'?'متزامن':'جاهز')+'</span>';}
+function kbDiagnostics(){
+ var docs=ws().kb;
+ var totalChunks=docs.reduce(function(a,k){return a+(k.chunkCount||0)},0);
+ var errs=docs.filter(function(k){return k.status==='error'});
+ var act=['pending','uploading','processing','embedding'];
+ return '<div class="glass rounded-2xl p-4 mb-4 text-xs text-ink-400 space-y-2">'
+ +'<div class="flex items-center justify-between flex-wrap gap-2"><b class="text-ink-200 text-sm">تشخيص قاعدة المعرفة</b><button data-action="kb-diag-log" class="btn-ghost !py-1 !px-3 text-[11px]">طباعة التفاصيل في console</button></div>'
+ +'<div class="flex flex-wrap gap-x-5 gap-y-1"><span>المستندات: <b class="text-ink-200">'+docs.length+'</b></span><span>جاهز: <b class="text-emerald-300">'+docs.filter(function(k){return k.status==='ready'}).length+'</b></span><span>قيد المعالجة: <b class="text-amber-300">'+docs.filter(function(k){return act.indexOf(k.status)>-1}).length+'</b></span><span>فشل: <b class="text-red-300">'+errs.length+'</b></span><span>إجمالي المقاطع: <b class="text-ink-200">'+totalChunks+'</b></span></div>'
+ +(errs.length?'<div class="text-red-300">'+errs.map(function(k){return '• '+esc(k.name)+': '+esc(k.error||'خطأ غير معروف')}).join('<br>')+'</div>':'')
+ +'<div class="text-[10px] text-ink-600">للتشخيص الكامل من جهة الخادم استعلم عن <span class="ltr">kb_diagnostics</span> في SQL Editor (تبويب «٤. العزل الصارم والتشخيص»).</div></div>';}
+/* نوافذ إضافة مصادر المعرفة (ملف / نص يدوي / رابط موقع) */
+function kbTypeModal(){
+ modal('<h3 class="font-display font-bold text-lg mb-1">إضافة مصدر معرفة</h3><p class="text-xs text-ink-500 mb-4">اختر نوع المصدر — ستتم المعالجة الفعلية فور الإضافة (رفع → استخراج → تقسيم → تضمينات).</p>'
+ +'<div class="grid grid-cols-3 gap-3">'
+ +'<button data-action="kb-open" data-id="file" class="glass rounded-xl p-4 text-center hover:border-tiffany-500/50 transition border border-transparent"><div class="mb-1 text-tiffany-400 flex justify-center">'+icon('doc','w-6 h-6')+'</div><div class="text-sm font-bold">ملف</div><div class="text-[10px] text-ink-500 mt-1">PDF / DOCX / XLSX / CSV / TXT</div></button>'
+ +'<button data-action="kb-open" data-id="text" class="glass rounded-xl p-4 text-center hover:border-tiffany-500/50 transition border border-transparent"><div class="mb-1 text-tiffany-400 flex justify-center">'+icon('edit','w-6 h-6')+'</div><div class="text-sm font-bold">نص يدوي</div><div class="text-[10px] text-ink-500 mt-1">اكتب المعلومة بنفسك</div></button>'
+ +'<button data-action="kb-open" data-id="url" class="glass rounded-xl p-4 text-center hover:border-tiffany-500/50 transition border border-transparent"><div class="mb-1 text-tiffany-400 flex justify-center">'+icon('globe','w-6 h-6')+'</div><div class="text-sm font-bold">رابط موقع</div><div class="text-[10px] text-ink-500 mt-1">زحف حتى 10 صفحات</div></button></div>');}
+function showFileInfo(file){
+ var info=document.getElementById('kb-fileinfo');if(!info)return;
+ info.classList.remove('hidden');
+ var n=document.getElementById('kb-filename');if(n)n.textContent=file.name;
+ var sz=document.getElementById('kb-filesize');if(sz)sz.textContent=fmtSize(file.size);}
+function kbTypeModalOpen(type){
+ if(type==='file'){
+  modal('<h3 class="font-display font-bold mb-3">رفع ملف</h3><form id="f-kbm-file" class="space-y-3">'
+  +'<div id="kb-drop" class="rounded-xl border-2 border-dashed border-ink-600 hover:border-tiffany-500/60 transition p-6 text-center cursor-pointer"><div class="text-ink-400 text-sm">اسحب الملف هنا أو اضغط للاختيار</div><div class="text-[10px] text-ink-600 mt-1">PDF, DOCX, XLS, XLSX, CSV, TXT</div><input id="kb-filepick" type="file" accept=".pdf,.txt,.docx,.csv,.xlsx,.xls,.md" class="hidden"></div>'
+  +'<div id="kb-fileinfo" class="hidden glass rounded-xl p-3 flex items-center justify-between text-xs"><span id="kb-filename" class="font-semibold"></span><span id="kb-filesize" class="text-ink-500"></span></div>'
+  +'<label class="lbl2">الـ Agent المرتبط (عزل المعرفة)<select id="kbm-file-agent" class="inp-s">'+agentOptions('')+'</select></label>'
+  +'<div class="flex gap-2"><button class="btn-primary flex-1">رفع ومعالجة</button><button type="button" data-action="modal-close" class="btn-ghost">إلغاء</button></div></form>');
+  setTimeout(function(){
+   var drop=document.getElementById('kb-drop'),inp=document.getElementById('kb-filepick');
+   if(!drop||!inp)return;
+   drop.addEventListener('click',function(){inp.click()});
+   ['dragover','dragenter'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.add('border-tiffany-500')})});
+   ['dragleave','drop'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.remove('border-tiffany-500');if(ev==='drop'&&e.dataTransfer&&e.dataTransfer.files[0]){inp.files=e.dataTransfer.files;showFileInfo(inp.files[0])}})});
+   inp.addEventListener('change',function(){if(inp.files[0])showFileInfo(inp.files[0])});
+  },50);
+ } else if(type==='text'){
+  modal('<h3 class="font-display font-bold mb-3">إضافة نص يدوي</h3><form id="f-kbm-text" class="space-y-3">'
+  +'<label class="lbl2">عنوان المعرفة (اختياري)<input name="title" class="inp-s" placeholder="مثال: أوقات العمل"></label>'
+  +'<label class="lbl2">النص *<textarea name="content" rows="6" required class="inp-s" placeholder="مثال: الدوام من السبت إلى الخميس، من الساعة 9 صباحًا حتى 6 مساءً."></textarea></label>'
+  +'<label class="lbl2">الـ Agent المرتبط (عزل المعرفة)<select id="kbm-text-agent" class="inp-s">'+agentOptions('')+'</select></label>'
+  +'<div class="flex gap-2"><button class="btn-primary flex-1">حفظ ومعالجة</button><button type="button" data-action="modal-close" class="btn-ghost">إلغاء</button></div></form>');
+ } else {
+  modal('<h3 class="font-display font-bold mb-3">إضافة رابط موقع</h3><form id="f-kbm-url" class="space-y-3">'
+  +'<label class="lbl2">رابط الموقع *<input name="url" type="url" required class="inp-s ltr" placeholder="https://example.com"></label>'
+  +'<div class="text-[10px] text-ink-500">يزحف حتى 10 صفحات ضمن نفس النطاق ويستخرج النص المفيد تلقائيًا. إذا فشل الزحف ستظهر الحالة «فشل» مع السبب.</div>'
+  +'<label class="lbl2">الـ Agent المرتبط (عزل المعرفة)<select id="kbm-url-agent" class="inp-s">'+agentOptions('')+'</select></label>'
+  +'<div class="flex gap-2"><button class="btn-primary flex-1">إضافة ومزامنة</button><button type="button" data-action="modal-close" class="btn-ghost">إلغاء</button></div></form>');
+ }}
 function pgKB(){
  var w=ws();
  var docs=w.kb.map(function(k){
   var cnt=(k.chunkCount!=null)?k.chunkCount:((k.chunks&&k.chunks.length)||0);
   var ag=k.agentId?w.agents.find(function(a){return a.id===k.agentId}):null;
   var icn=k.type==='url'?'globe':k.type==='file'?'doc':'edit';
-  var typeLbl=k.type==='url'?'Website':k.type==='file'?'ملف':'نص يدوي';
-  return '<div class="glass rounded-2xl p-5"><div class="flex items-start gap-4"><span class="w-11 h-11 rounded-xl bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center flex-none">'+icon(icn,'w-5 h-5')+'</span><div class="flex-1 min-w-0"><div class="flex items-center gap-2 flex-wrap"><b class="text-sm">'+esc(k.name)+'</b>'+kbStatusBadge(k)+'</div><div class="text-[11px] text-ink-500 mt-1 flex flex-wrap gap-x-3 gap-y-1"><span>النوع: '+typeLbl+'</span><span>Agent: '+(ag?esc(ag.name):'مشترك')+'</span><span>'+cnt+' مقطع</span><span>أُضيف: '+fmtDate(k.createdAt)+'</span>'+(k.lastSync?'<span>آخر تحديث: '+timeAgo(k.lastSync)+'</span>':'')+'</div><p class="text-xs text-ink-400 mt-2 leading-6 line-clamp-2">'+esc(k.content||'')+'</p></div><div class="flex gap-1 flex-none">'+(k.type==='url'?'<button data-action="kb-sync" data-id="'+k.id+'" class="p-2 text-tiffany-300 hover:bg-tiffany-500/10 rounded-lg" title="مزامنة الآن">'+icon('refresh','w-4 h-4')+'</button>':'')+(k.type==='text'?'<button data-action="kb-edit" data-id="'+k.id+'" class="p-2 text-ink-400 hover:text-white hover:bg-ink-800 rounded-lg" title="تعديل">'+icon('edit','w-4 h-4')+'</button>':'')+'<button data-action="kb-del" data-id="'+k.id+'" class="p-2 text-red-400 hover:bg-red-500/10 rounded-lg" title="حذف">'+icon('trash','w-4 h-4')+'</button></div></div></div>'}).join('');
- return '<div class="flex items-center justify-between mb-5 flex-wrap gap-3"><div><h2 class="font-display font-bold text-xl">Knowledge Base</h2><p class="text-xs text-ink-500 mt-1">كل مصدر معزول حسب الـ Agent — لا تداخل بين الوكلاء. الزحف والملفات تعمل فورًا.</p></div><button data-action="kb-add" class="btn-primary">'+icon('plus','w-4 h-4')+' إضافة مصدر</button></div><div class="space-y-3">'+(docs||'<div class="glass rounded-2xl p-12 text-center text-ink-500">لا مصادر بعد — اضغط «إضافة مصدر» وأضف رابط موقعك أو ملفًا أو نصًا.</div>')+'</div>';}
+  var typeLbl=k.type==='url'?'رابط موقع':k.type==='file'?'ملف':'نص يدوي';
+  var acts='';
+  if(k.type==='url')acts+='<button data-action="kb-reprocess" data-id="'+k.id+'" class="p-2 text-tiffany-300 hover:bg-tiffany-500/10 rounded-lg" title="إعادة الزحف">'+icon('refresh','w-4 h-4')+'</button>';
+  if(k.type==='file')acts+='<button data-action="kb-reprocess" data-id="'+k.id+'" class="p-2 text-tiffany-300 hover:bg-tiffany-500/10 rounded-lg" title="إعادة المعالجة">'+icon('refresh','w-4 h-4')+'</button>';
+  if(k.type==='text')acts+='<button data-action="kb-edit" data-id="'+k.id+'" class="p-2 text-ink-400 hover:text-white hover:bg-ink-800 rounded-lg" title="تعديل">'+icon('edit','w-4 h-4')+'</button>';
+  acts+='<button data-action="kb-del" data-id="'+k.id+'" class="p-2 text-red-400 hover:bg-red-500/10 rounded-lg" title="حذف">'+icon('trash','w-4 h-4')+'</button>';
+  return '<div class="glass rounded-2xl p-5"><div class="flex items-start gap-4"><span class="w-11 h-11 rounded-xl bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center flex-none">'+icon(icn,'w-5 h-5')+'</span>'
+  +'<div class="flex-1 min-w-0"><div class="flex items-center gap-2 flex-wrap"><b class="text-sm">'+esc(k.name)+'</b>'+kbStatusBadge(k)+'</div>'
+  +'<div class="text-[11px] text-ink-500 mt-1 flex flex-wrap gap-x-3 gap-y-1"><span>النوع: '+typeLbl+'</span><span>Agent: '+(ag?esc(ag.name):'مشترك (كل الوكلاء)')+'</span><span>'+cnt+' مقطع</span><span>أُضيف: '+fmtDate(k.createdAt)+'</span>'+(k.lastSync?'<span>آخر مزامنة: '+timeAgo(k.lastSync)+'</span>':'')+(k.size?'<span>الحجم: '+fmtSize(k.size)+'</span>':'')+'</div>'
+  +'<p class="text-xs text-ink-400 mt-2 leading-6 line-clamp-2">'+esc(k.content||'')+'</p>'
+  +(k.status==='error'?'<div class="text-[11px] text-red-300 mt-1">سبب الفشل: '+esc(k.error||'خطأ غير معروف')+'</div>':'')
+  +'</div><div class="flex gap-1 flex-none">'+acts+'</div></div></div>'}).join('');
+ return '<div class="flex items-center justify-between mb-5 flex-wrap gap-3"><div><h2 class="font-display font-bold text-xl">مصادر المعرفة</h2><p class="text-xs text-ink-500 mt-1">كل مصدر معزول حسب الـ Agent — لا تداخل بين الوكلاء. الحالة لا تصبح «جاهز» إلا بعد نجاح المعالجة فعليًا.</p></div><button data-action="kb-add" class="btn-primary">'+icon('plus','w-4 h-4')+' إضافة مصدر</button></div>'
+ +kbDiagnostics()
+ +'<div class="space-y-3">'+(docs||'<div class="glass rounded-2xl p-12 text-center text-ink-500">لا مصادر بعد — اضغط «إضافة مصدر» وأضف رابط موقعك أو ملفًا أو نصًا.</div>')+'</div>';}
 function pgAnalytics(){
  var w=ws();var total=w.convos.length||1;
  var closed=w.convos.filter(function(c){return c.status==='closed'}).length;
@@ -1380,14 +1600,32 @@ document.addEventListener('click',function(e){
     .catch(function(err){wT.__unsynced=true;toast('حدث التغيير محليًا وفشلت المزامنة: '+err.message,'err');save();afterT()});
    }else{save();toast(wT.enabled?'تم تفعيل الويدجت':'تم تعطيل الويدجت','ok');afterT()}}}
  else if(a==='modal-close')closeModal();
- else if(a==='kb-add'){kbTab='url';kbAddModal()}
- else if(a==='kb-tab'){kbTab=id;var v=document.getElementById('kb-tab-view');if(v)v.innerHTML=kbTabView();$$('#modal-root .eng-tab').forEach(function(b){b.classList.toggle('on',b.dataset.id===id)})}
+ else if(a==='kb-add'){kbTypeModal()}
+ else if(a==='kb-open'){kbTypeModalOpen(id)}
+ else if(a==='kb-diag-log'){
+  var docsL=ws().kb.map(function(k){return {name:k.name,type:k.type,status:k.status,agentId:k.agentId||'(مشترك)',chunks:k.chunkCount||0,lastSync:k.lastSync?new Date(k.lastSync).toISOString():'',error:k.error||''}});
+  console.group('KB Diagnostics');console.table(docsL);console.log('إجمالي المستندات:',docsL.length,'| إجمالي المقاطع:',docsL.reduce(function(a,k){return a+k.chunks},0));console.groupEnd();
+  toast('تمت طباعة التشخيص في console','ok')}
+ else if(a==='kb-reprocess'){
+  var docR=kbDoc(id);if(!docR)return;
+  if(docR.type==='url')processUrl(docR.name,docR);
+  else if(docR.type==='text')reIngestDoc(docR);
+  else if(docR.type==='file')reProcessFile(docR);}
+ else if(a==='kb-del'){
+  if(!confirm('حذف هذا المصدر ومقاطعه؟ لا يمكن التراجع.'))return;
+  var docD=kbDoc(id);if(!docD)return;
+  ws().kb=ws().kb.filter(function(x){return x.id!==id});persist();
+  if(isRemote()&&cfg&&apiBase()){
+   fetch(apiBase()+'/kb-ingest',{method:'POST',headers:{'Content-Type':'application/json','api-key':cfg.key},body:JSON.stringify({doc_id:docD.id,delete:true})})
+   .then(function(r){return r.json().catch(function(){return{}})}).then(function(j){toast(j&&j.ok?'تم حذف المصدر ومقاطعه من قاعدة البيانات ✔':'حُذف المصدر محليًا — تحقّق من حذف المقاطع يدويًا (راجع تبويب التشخيص)',j&&j.ok?'ok':'err');save();route()})
+   .catch(function(err){console.error(err);toast('حُذف محليًا لكن فشل الحذف من الخادم: '+arErr(err.message),'err');save();route()});
+  }else{save();route()}
+  return}
  else if(a==='kb-sync'){
   var docS=kbDoc(id);
   if(docS&&docS.type==='url'){toast('جارٍ إعادة مزامنة الموقع...');processUrl(docS.name,docS)}
   else toast('المزامنة متاحة لمصادر الروابط فقط','err')}
  else if(a==='kb-edit'){var docE=kbDoc(id);if(docE)modal('<h3 class="font-display font-bold mb-3">تعديل المصدر اليدوي</h3><form id="f-kb-edit" class="space-y-3"><input type="hidden" name="id" value="'+docE.id+'"><label class="lbl2">العنوان (اختياري)<input name="title" class="inp-s" value="'+esc(docE.name)+'"></label><label class="lbl2">المحتوى (مصدر معرفة فقط)<textarea name="content" rows="8" class="inp-s">'+esc(docE.content||'')+'</textarea></label><button class="btn-primary w-full">حفظ وإعادة المعالجة</button></form>')}
- else if(a==='kb-del'){if(confirm('حذف هذا المصدر ومقاطعه؟')){ws().kb=ws().kb.filter(function(x){return x.id!==id});save();route()}}
  else if(a==='ob-next'){var st=ws().settings;var curStep=st.onboardingStep||st.obStep||1;
   if(curStep===1&&!String(st.name||'').trim()){toast('اكتب اسم النشاط أولًا','err');return}
   if(curStep===2&&!(st.goals&&st.goals.length)){toast('اختر هدفًا واحدًا على الأقل','err');return}
@@ -1552,29 +1790,51 @@ document.addEventListener('submit',async function(e){
    .catch(function(err){nw.__unsynced=true;if(doneW)doneW();toast('أُنشئ محليًا لكن فشلت المزامنة: '+err.message,'err');save();closeModal();draft=null;go('#/app/builder?id='+nw.id);});
   }else{save();closeModal();draft=null;go('#/app/builder?id='+nw.id)}
   return}
+ else if(f.id==='f-kbm-file'){
+  var fi=document.getElementById('kb-filepick');var file=fi&&fi.files[0];
+  if(!file){toast('اختر ملفًا أولًا — اضغط على منطقة الرفع أو اسحب الملف','err');return}
+  var agF=document.getElementById('kbm-file-agent');
+  closeModal();
+  processFile(file,agF?agF.value:'');
+  return}
+ else if(f.id==='f-kbm-text'){
+  var contentT=String(fd.get('content')||'').trim();
+  if(!contentT){toast('اكتب نص المعرفة أولًا','err');return}
+  var titleT=String(fd.get('title')||'').trim();
+  var agT=document.getElementById('kbm-text-agent');
+  closeModal();
+  await processTextDoc(titleT,contentT,agT?agT.value:'');
+  return}
+ else if(f.id==='f-kbm-url'){
+  var urlU=String(fd.get('url')||'').trim();
+  if(!/^https?:\/\//i.test(urlU)){toast('الرابط يجب أن يبدأ بـ http أو https','err');return}
+  var agU=document.getElementById('kbm-url-agent');
+  var dU={id:uid('kb_'),name:urlU,type:'url',agentId:agU?agU.value:'',content:'جارٍ الزحف واستخراج المعلومات...',status:'processing',chunks:[],chunkCount:0,createdAt:now(),error:''};
+  ws().kb.unshift(dU);save();closeModal();refreshKbUI();
+  processUrl(urlU,dU);
+  return}
  else if(f.id==='f-kb-url'){
   var url=String(fd.get('url')).trim();
   var agentIdU=fd.get('agentId')||'';
-  var d2={id:uid('kb_'),name:url,type:'url',agentId:agentIdU,content:'جارٍ الزحف واستخراج المعلومات...',status:'processing',chunks:[],createdAt:now()};
-  ws().kb.unshift(d2);save();closeModal();refreshKbUI();
+  var d2={id:uid('kb_'),name:url,type:'url',agentId:agentIdU,content:'جارٍ الزحف واستخراج المعلومات...',status:'processing',chunks:[],chunkCount:0,createdAt:now(),error:''};
+  ws().kb.unshift(d2);save();refreshKbUI();
   processUrl(url,d2);
   return}
  else if(f.id==='f-kb-file'){
   var fileIn=document.getElementById('kb-file2');
-  var file=fileIn?fileIn.files[0]:null;
-  if(!file){toast('اختر ملفًا أولًا','err');return}
+  var file2=fileIn?fileIn.files[0]:null;
+  if(!file2){toast('اختر ملفًا أولًا','err');return}
   var agentIdF=fd.get('agentId')||'';
-  closeModal();refreshKbUI();
-  processFile(file,agentIdF);
+  refreshKbUI();
+  processFile(file2,agentIdF);
   return}
  else if(f.id==='f-kb-text'){
   var content=String(fd.get('content')||'').trim();
   if(!content){toast('اكتب المعلومات أولًا','err');return}
-  var title=String(fd.get('title')||'').trim()||content.slice(0,60);
-  var doc={id:uid('kb_'),name:title,type:'text',agentId:fd.get('agentId')||'',content:content,status:'ready',createdAt:now(),lastSync:now()};
-  chunkify(doc);
-  ws().kb.unshift(doc);save();closeModal();refreshKbUI();
-  toast('تم حفظ المصدر ✔ — '+doc.chunkCount+' مقطع (مصدر معرفة فقط)','ok');
+  var title=String(fd.get('title')||'').trim();
+  var agentIdT=fd.get('agentId')||'';
+  var okT=await processTextDoc(title,content,agentIdT);
+  if(okT)f.reset();
   return}
  else if(f.id==='f-kb-edit'){
   var docU=ws().kb.find(function(x){return x.id===fd.get('id')});
@@ -1582,8 +1842,9 @@ document.addEventListener('submit',async function(e){
    var newContent=String(fd.get('content')||'').trim();
    if(!newContent){toast('المحتوى لا يمكن أن يكون فارغًا','err');return}
    docU.name=String(fd.get('title')||'').trim()||newContent.slice(0,60);
-   docU.content=newContent;chunkify(docU);docU.status='ready';docU.lastSync=now();
-   save();closeModal();refreshKbUI();toast('تم حفظ المصدر وإعادة معالجته: '+docU.chunkCount+' مقطع','ok');}
+   docU.content=newContent;
+   closeModal();
+   reIngestDoc(docU);}
   return}
  else if(f.id==='f-dash-msg'){var cd=ws().convos.find(function(x){return x.id===selConvo});if(!cd)return;
   var txt=String(fd.get('m')||'').trim();if(!txt)return;
@@ -1596,7 +1857,6 @@ window.addEventListener('error',function(ev){console.error('AOWN runtime error:'
 async function boot(){
  try{
   loadDB();
-  /* الوضع المحلي/التجريبي يبقى محفوظًا — لا يُمسح عند إعادة الفتح */
   if(!isRemote()&&db.demo&&!db.ws){db.ws=starterKit();persist()}
   const c=sbClient();
   if(c){
