@@ -68,7 +68,7 @@ pre.codebox{direction:ltr;text-align:left;font-family:ui-monospace,Menlo,monospa
 <div id="app"></div>
 <div id="toasts" class="fixed bottom-5 left-5 z-[999] space-y-2"></div>
 <div id="modal-root"></div>
-<!-- ====== Server delivery sources (تُعرض في صفحة الخلفية — لا تعمل بدون نشرها) ====== -->
+<!-- ====== Server delivery sources ====== -->
 <script type="text/plain" id="src-sql-ob">
 -- Onboarding: لا يلزم جدول جديد. حالة المعالج تُدار ضمن إعدادات مساحة العمل
 -- وتُحفظ تلقائيًا عبر save() مع استئناف تلقائي عند العودة.
@@ -124,34 +124,19 @@ create index if not exists chunks_agent_idx on public.knowledge_chunks(agent_id)
 </script>
 <script type="text/plain" id="src-sql4">
 -- إدارة ســوشـــيــــال — Phase 4: عزل صارم بين الوكلاء + أدوات تشخيص
--- عزل صارم: كل وكيل يرى معرفته فقط. لا تسريب عبر agent_id الفارغ.
--- المعرفة "المشتركة" تُكتب الآن بنسخة لكل وكيل عبر (kb-ingest / kb-process / kb-crawl)،
--- لذلك لا حاجة لفتح agent_id IS NULL للجميع.
 create or replace function public.match_kb_chunks_agent(ws uuid, ag text, q vector, match_count int default 4)
 returns table (doc_id text, content text, similarity float) language sql stable as $$
 select c.doc_id, c.content, 1 - (c.embedding <=> q) as similarity
 from public.knowledge_chunks c
 where c.workspace_id = ws and c.embedding is not null and c.agent_id = ag
 order by c.embedding <=> q limit match_count; $$;
--- عرض تشخيصي (شغّله من SQL Editor بحساب مالك المشروع):
 create or replace view public.kb_diagnostics as
-select d.id as doc_id,
-d.workspace_id,
-d.data->>'name' as name,
-d.data->>'type' as type,
-d.data->>'status' as status,
-d.data->>'agentId' as agent_id,
+select d.id as doc_id, d.workspace_id, d.data->>'name' as name, d.data->>'type' as type,
+d.data->>'status' as status, d.data->>'agentId' as agent_id,
 (select count(*) from public.knowledge_chunks c where c.doc_id = d.id) as chunks_total,
 (select count(*) from public.knowledge_chunks c where c.doc_id = d.id and c.embedding is not null) as embeddings,
 (select count(distinct c.agent_id) from public.knowledge_chunks c where c.doc_id = d.id) as agents_linked
 from public.knowledge_docs d;
--- استعلامات تشخيصية سريعة:
--- select count(*) from public.knowledge_docs;
--- select count(*) from public.knowledge_chunks;
--- select doc_id, count(*) from public.knowledge_chunks group by doc_id order by 2 desc;
--- select agent_id, count(*) from public.knowledge_chunks group by agent_id;
--- حذف مقاطع مصدر معيّن يدويًا:
--- delete from public.knowledge_chunks where doc_id = 'DOC_ID';
 </script>
 <script type="text/plain" id="src-verify">
 // supabase/functions/verify-widget/index.ts
@@ -173,7 +158,6 @@ if(!wd.agentId)return json({error:"no_agent"},500);
 const {data:agentRow}=await admin.from("agents").select("data").eq("id",String(wd.agentId)).maybeSingle();
 const ad:any=agentRow?.data??{};
 const {data:wsRow}=await admin.from("workspaces").select("plan").eq("id",widgetRow.workspace_id).maybeSingle();
-// إعدادات العرض فقط — لا تعليمات ولا أسرار
 return json({ok:true,widget_id,agent:{name:ad.name||"مساعدك الذكي",avatar:ad.avatar||""},settings:{
 name:wd.name||ad.name||"مساعدك الذكي",welcome:wd.welcome||ad.welcome||"أهلًا بك 👋",
 placeholder:wd.placeholder||"اكتب رسالتك...",offline:wd.offline||"نحن غير متصلين حاليًا.",
@@ -189,7 +173,7 @@ mobile:wd.mobile==="full"?"full":"panel",credit:(wsRow?.plan||"free")==="free"}}
 });
 </script>
 <script type="text/plain" id="src-ai">
-// supabase/functions/ai-respond/index.ts — RAG كامل: تضمين السؤال → بحث متجهي → سياق → Gemini (temperature=0.1)
+// supabase/functions/ai-respond/index.ts — RAG صارم (temperature=0.1) بدون هلوسة
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 const CORS={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, x-client-info, api-key, content-type","Access-Control-Allow-Methods":"POST, OPTIONS"};
@@ -245,15 +229,11 @@ return json({reply:"أكيد، حولتك للموظف المختص الآن ✋
 const apiKey=Deno.env.get("GEMINI_API_KEY");
 if(!apiKey)return json({error:"server",message:"عذرًا، حصل خطأ مؤقت. حاول مرة ثانية."},500);
 const genAI=new GoogleGenerativeAI(apiKey);
-// 1) تضمين السؤال
 const qVec=(await genAI.getGenerativeModel({model:"text-embedding-004"}).embedContent(text)).embedding.values as number[];
-// 2) بحث متجهي في معرفة هذا الـ Agent فقط (عزل صارم)
 const {data:hits}=await admin.rpc("match_kb_chunks_agent",{ws:wsId,ag:agentId,q:qVec,match_count:4});
 const context=(hits||[]).filter((h:any)=>h.similarity>=0.55).map((h:any)=>h.content).join("\n---\n");
-// 3) سياق المحادثة
 const history=(cd.messages||[]).slice(-10).filter((m:any)=>m.from==="visitor"||m.from==="ai")
 .map((m:any)=>({role:m.from==="visitor"?"user" as const:"model" as const,parts:[{text:String(m.text)}]}));
-// 4) Prompt صارم (Grounded) — يمنع الهلوسة منعًا باتًا
 const sys=[ad.instructions||"أنت موظف خدمة عملاء.",
 "أنت موظف خدمة عملاء لمنصة إدارة ســوشـــيــــال. وظيفتك الوحيدة هي الإجابة بناءً على السياق المرفق فقط (Context).",
 "إذا كان السؤال خارج السياق، أو يطلب أسعاراً أو خدمات أو منتجات أو مواعيد أو سياسات أو أرقاماً غير مذكورة في السياق، قل نصاً حرفياً:",
@@ -283,8 +263,6 @@ return json({reply,handoff:false,conversation_id:conv?.id||null});
 </script>
 <script type="text/plain" id="src-ingest">
 // supabase/functions/kb-ingest/index.ts
-// يحفظ النصوص اليدوية كمعرفة حقيقية: تقسيم + تضمينات + عزل حسب الـ Agent.
-// يستقبل: { doc_id, text, agent_id, workspace_id } أو { doc_id, delete: true } للحذف الكامل.
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 const json=(b,s=200)=>new Response(JSON.stringify(b),{status:s,headers:{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"}});
@@ -296,10 +274,6 @@ const body=await req.json().catch(()=>({}));
 const doc_id=body.doc_id;
 if(!doc_id)return json({error:"bad_request",message:"طلب غير صالح."},400);
 const admin=createClient(Deno.env.get("SUPABASE_URL")!,Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-const dr=await admin.from("knowledge_docs").select("*").eq("id",doc_id).maybeSingle();
-const row:any=dr.data;const dd:any=(row&&row.data)||{};
-const wsId=body.workspace_id||(row?row.workspace_id:null);
-// وضع الحذف الكامل: مقاطع + مستند
 if(body.delete===true){
 const d1=await admin.from("knowledge_chunks").delete().eq("doc_id",doc_id);
 if(d1.error)return json({error:"delete",message:"فشل حذف المقاطع: "+d1.error.message},500);
@@ -309,15 +283,14 @@ return json({ok:true,deleted:true});
 }
 const text=String(body.text||"").trim();
 if(!text)return json({error:"empty",message:"النص فارغ."},422);
-// تحديد الـ Agent: من الطلب، وإلا من knowledge_docs.data.agentId
+const dr=await admin.from("knowledge_docs").select("*").eq("id",doc_id).maybeSingle();
+const row:any=dr.data;const dd:any=(row&&row.data)||{};
+const wsId=body.workspace_id||(row?row.workspace_id:null);
 let agentId=body.agent_id||null;
 if(!agentId)agentId=dd.agentId||null;
 let targets:string[]=[];
 if(agentId)targets=[agentId];
-else{
-const ar=await admin.from("agents").select("id").eq("workspace_id",wsId);
-targets=(ar.data||[]).map((a:any)=>a.id);
-}
+else{const ar=await admin.from("agents").select("id").eq("workspace_id",wsId);targets=(ar.data||[]).map((a:any)=>a.id);}
 if(!targets.length)return json({error:"no_agent",message:"لا يوجد Agent لربط المعرفة به. أنشئ Agent أولًا."},422);
 const chunks=chunkText(text).slice(0,400);
 const genAI=new GoogleGenerativeAI(Deno.env.get("GEMINI_API_KEY")!);
@@ -331,7 +304,6 @@ r.embeddings.forEach((e:any,j:number)=>{targets.forEach(tg=>rows.push({workspace
 }
 const ins=await admin.from("knowledge_chunks").insert(rows);
 if(ins.error)return json({error:"insert",message:"فشل تخزين المقاطع: "+ins.error.message},500);
-// تحديث الحالة إلى ready فقط بعد نجاح الإدخال الفعلي
 if(row){dd.status="ready";dd.chunkCount=chunks.length;dd.lastSync=Date.now();dd.error="";
 await admin.from("knowledge_docs").update({data:dd}).eq("id",doc_id);}
 return json({ok:true,chunks:chunks.length});
@@ -339,7 +311,7 @@ return json({ok:true,chunks:chunks.length});
 });
 </script>
 <script type="text/plain" id="src-kbproc">
-// supabase/functions/kb-process/index.ts — يستقبل { doc_id, path, name, agent_id }
+// supabase/functions/kb-process/index.ts
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 import { extractText, getDocumentProxy } from "npm:unpdf";
@@ -368,7 +340,6 @@ if(dlErr||!file)return json({error:"download",message:"تعذر قراءة ال�
 const buf=new Uint8Array(await file.arrayBuffer());
 const text=await extractByType(path.split("/").pop()||"file",buf);
 if(!text||!text.trim())return json({error:"empty",message:"الملف لا يحتوي نصًا قابلًا للاستخراج."},422);
-// تحديد الـ Agent: من الطلب، وإلا من knowledge_docs.data.agentId (fallback آمن)
 const dr=await admin.from("knowledge_docs").select("*").eq("id",doc_id).maybeSingle();
 const row:any=dr.data;const dd:any=(row&&row.data)||{};
 let agentId=agent_id||null;
@@ -416,6 +387,7 @@ try{
 const {url,doc_id,workspace_id,agent_id}=await req.json().catch(()=>({}));
 if(!url||!doc_id)return json({error:"bad_request",message:"طلب غير صالح."},400);
 if(!/^https?:\/\//i.test(url))return json({error:"bad_url",message:"الرابط يجب أن يبدأ بـ http أو https."},400);
+const admin=createClient(Deno.env.get("SUPABASE_URL")!,Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 const origin=new URL(url).origin;
 const queue:string[]=[url];const visited=new Set<string>();const pages:string[]=[];
 while(queue.length&&visited.size<MAX_PAGES){
@@ -424,17 +396,15 @@ const key=u.origin+u.pathname;
 if(u.origin!==origin||visited.has(key))continue;
 visited.add(key);
 try{const res=await fetch(u.toString(),{headers:{"User-Agent":"SocialBot/1.0"},redirect:"follow",signal:AbortSignal.timeout(15000)});
-if(!res.ok){console.warn("crawl page failed:",res.status,u.toString());continue;}
+if(!res.ok){continue;}
 const ct=res.headers.get("content-type")||"";
 if(!ct.includes("html"))continue;
 const {text,links}=extractPage(await res.text());
 if(text.length>40)pages.push("صفحة: "+u.pathname+"\n"+text.slice(0,20000));
 for(const l of links)queue.push(new URL(l,u.toString()).toString());
-}catch(fetchErr){console.warn("crawl fetch error:",fetchErr);continue;}
+}catch(fetchErr){continue;}
 }
-if(!pages.length)return json({error:"empty",message:"الموقع لا يحتوي نصًا كافيًا — قد يعتمد على JavaScript في عرض المحتوى أو يمنع القراءة الآلية."},422);
-// تحديد الـ Agent: من الطلب، وإلا من knowledge_docs.data.agentId
-const admin=createClient(Deno.env.get("SUPABASE_URL")!,Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+if(!pages.length)return json({error:"empty",message:"الموقع لا يحتوي نصًا كافيًا — قد يعتمد على JavaScript أو يمنع القراءة الآلية."},422);
 const dr=await admin.from("knowledge_docs").select("*").eq("id",doc_id).maybeSingle();
 const row:any=dr.data;const dd:any=(row&&row.data)||{};
 let agentId=agent_id||null;
@@ -463,8 +433,7 @@ return json({ok:true,chunks:chunks.length,pages:visited.size});
 });
 </script>
 <script type="text/plain" id="src-widgetjs">
-/* widget.js — السمات: data-widget-id / data-token / data-api
-يتحقق عبر verify-widget ثم يبني الواجهة داخل Shadow DOM. النسخة الكاملة في التسليم السابق. */
+/* widget.js — السمات: data-widget-id / data-token / data-api */
 (function(){
 var sc=document.currentScript||(function(){var all=document.querySelectorAll('script[data-widget-id]');return all[all.length-1];})();
 if(!sc)return;
@@ -480,7 +449,6 @@ fetch(API+'/verify-widget',{method:'POST',headers:{'Content-Type':'application/j
 </script>
 <script>
 /* ================= Runtime ================= */
-const PROD=true;
 /* ================= Helpers ================= */
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const uid=p=>(p||'')+Math.random().toString(36).slice(2,9);
@@ -493,8 +461,9 @@ const timeAgo=t=>{const d=now()-t;if(d<6e4)return 'الآن';if(d<36e5)return '�
 const hashPw=s=>{let h=9;for(const c of String(s))h=Math.imul(h^c.charCodeAt(0),387420489);return 'h'+(h^h>>>9)};
 const norm=s=>String(s||'').replace(/[\u064B-\u0652\u0640]/g,'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').toLowerCase();
 const tokens=s=>norm(s).split(/[^\u0600-\u06FFa-z0-9]+/).filter(w=>w.length>2);
+const isNetErr=m=>/failed to fetch|networkerror|load failed|network request|timeout|aborted/i.test(String(m||''));
 function fmtSize(b){if(b==null)return '';if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';return (b/1048576).toFixed(1)+' MB'}
-function arErr(m){m=String(m||'');if(/failed to fetch|networkerror|load failed/i.test(m))return 'تعذر الوصول إلى الخادم — تحقق من اتصال الإنترنت';if(/401|invalid api key|invalid key/i.test(m))return 'خطأ في مفتاح الاتصال بالخادم';return m}
+function arErr(m){m=String(m||'');if(isNetErr(m))return 'تعذر الوصول إلى الخادم — تحقق من اتصال الإنترنت';if(/401|invalid api key|invalid key/i.test(m))return 'خطأ في مفتاح الاتصال بالخادم';return m}
 function md(s){let t=esc(s);t=t.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
 t=t.replace(/\[(.+?)\]\((.+?)\)/g,function(m,txt,rawUrl){const u=String(rawUrl||'').trim();
 if(/^https?:\/\//i.test(u))return '<a class="underline text-tiffany-400" target="_blank" rel="noopener noreferrer" href="'+u+'">'+txt+'</a>';return txt;});
@@ -502,7 +471,7 @@ return t.replace(/\n/g,'<br>');}
 function toast(msg,type){const c=document.getElementById('toasts');if(!c)return;const el=document.createElement('div');
 el.className='fadeUp glass rounded-xl px-4 py-3 text-sm flex items-center gap-2 shadow-soft '+(type==='err'?'!border-red-500/40 text-red-300':type==='ok'?'!border-tiffany-500/40 text-tiffany-300':'text-ink-100');
 el.innerHTML=(type==='err'?'⚠️':type==='ok'?'✅':'ℹ️')+'<span>'+esc(msg)+'</span>';c.appendChild(el);
-setTimeout(function(){el.style.opacity='0';el.style.transition='.4s';setTimeout(function(){el.remove()},400)},3400)}
+setTimeout(function(){el.style.opacity='0';el.style.transition='.4s';setTimeout(function(){el.remove()},400)},3600)}
 function copyText(t){const done=()=>toast('تم النسخ إلى الحافظة','ok');
 if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done).catch(function(){fbCopy(t,done)})}else fbCopy(t,done);
 function fbCopy(x,cb){const ta=document.createElement('textarea');ta.value=x;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy')}catch(e){}ta.remove();cb()}}
@@ -511,7 +480,7 @@ const apiBase=()=>(cfg&&cfg.url)?cfg.url.replace(/\/+$/,'')+'/functions/v1':null
 function busy(btn,label){if(!btn)return null;var old=btn.innerHTML;btn.disabled=true;btn.innerHTML=label;return function(){btn.disabled=false;btn.innerHTML=old}}
 function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
 function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
-/* تحميل مكتبات الـ CDN ديناميكيًا عند الحاجة (آلية آمنة لرفع الملفات) */
+/* تحميل مكتبات الـ CDN ديناميكيًا عند الحاجة (لرفع الملفات) */
 function loadScriptOnce(src,checkFn){
 return new Promise(function(res,rej){
 if(checkFn&&checkFn()){res();return}
@@ -578,6 +547,12 @@ let sb=null, remoteUser=null, remoteBroken=false;
 function sbClient(){if(!cfg||!cfg.url||!cfg.key)return null;if(!window.supabase)return null;
 if(!sb){try{sb=window.supabase.createClient(cfg.url,cfg.key)}catch(e){return null}}return sb}
 const isRemote=()=>!!sbClient();
+function useLocalMode(){cfg=null;sb=null;remoteBroken=false;closeModal();toast('تم التحويل للوضع المحلي — بياناتك تُحفظ على هذا الجهاز','ok');route()}
+function authNetFail(msg){
+modal('<h3 class="font-display font-bold text-lg mb-2">تعذر الاتصال بالخادم</h3>'
++'<p class="text-sm text-ink-300 leading-7 mb-2">'+esc(arErr(msg))+'</p>'
++'<p class="text-xs text-ink-500 leading-6 mb-4">يمكنك إعادة المحاولة عند عودة الاتصال، أو المتابعة فورًا بالوضع المحلي حيث تُحفظ الحسابات والبيانات على جهازك.</p>'
++'<div class="flex gap-2"><button data-action="modal-close" class="btn-ghost flex-1">إغلاق وإعادة المحاولة</button><button data-action="local-mode" class="btn-primary flex-1">المتابعة بالوضع المحلي</button></div>');}
 /* ================= Local DB ================= */
 const LS='aown_db_v1';
 let db;
@@ -588,7 +563,6 @@ function persist(){lsSet(LS,JSON.stringify(db))}
 function me(){
 if(isRemote())return remoteUser?{id:remoteUser.id,name:((remoteUser.email||'مستخدم').split('@')[0]),email:remoteUser.email,demo:false}:null;
 if(db&&db.demo)return {id:'demo',name:'زائر تجريبي',email:'demo@social.app',demo:true};
-if(PROD)return null;
 return db.users.find(function(u){return u.id===db.session})}
 const ws=()=>db.ws;
 function defWidget(agentId,name){return {id:uid('w_'),agentId:agentId,name:name,token:uid('tk_'),enabled:true,
@@ -618,8 +592,11 @@ function save(){
 persist();
 if(isRemote()&&!remoteBroken&&db.ws&&db.ws.__wid){
 clearTimeout(pushTimer);
-pushTimer=setTimeout(function(){pushTables(sbClient(),db.ws.__wid,db.ws).catch(function(err){
-if(!remoteBroken){remoteBroken=true;toast('انقطعت المزامنة مع الخادم — تم الحفظ محليًا مؤقتًا','err');console.error(err)}})},700);}}
+pushTimer=setTimeout(function(){
+pushTables(sbClient(),db.ws.__wid,db.ws).then(function(){
+if(remoteBroken){remoteBroken=false;toast('عادت المزامنة مع الخادم ✔','ok');route()}
+}).catch(function(err){
+if(!remoteBroken){remoteBroken=true;toast('انقطعت المزامنة مع الخادم — تم الحفظ محليًا مؤقتًا. أعد المحاولة من الشريط الجانبي.','err');console.error(err);route()}})},700);}}
 async function pushTables(c,wid,s){
 const T={agents:s.agents,widgets:s.widgets,knowledge_docs:s.kb,contacts:s.contacts,conversations:s.convos,invoices:s.invoices};
 for(const t in T){
@@ -630,7 +607,9 @@ if(r3.error)throw r3.error;}
 async function loadRemote(){
 const c=sbClient();if(!c||!remoteUser)return false;
 const prevSet=(db&&db.ws&&db.ws.settings)?db.ws.settings:null;
-let q=await c.from('workspaces').select('*').eq('owner_id',remoteUser.id).maybeSingle();
+let q;
+try{q=await c.from('workspaces').select('*').eq('owner_id',remoteUser.id).maybeSingle()}
+catch(e){toast('تعذر الوصول إلى قاعدة البيانات — تحقق من الإنترنت','err');return false}
 if(q.error){toast(/permission|policy/i.test(q.error.message)?'خطأ صلاحيات — تأكد من تفعيل سياسات RLS':'تعذر الاتصال بقاعدة البيانات','err');return false}
 let wsRow=q.data;
 if(!wsRow){wsRow=await provisionRemote(c);if(!wsRow)return false}
@@ -664,7 +643,7 @@ await sbUpsert('widgets',w);
 if(w.__unsynced)delete w.__unsynced;}
 /* ================= CRM ================= */
 function classifyConvo(c){
-const t=norm((c.messages||[]).filter(function(m){return m.from==='visitor'}).map(function(m){return String(m.text||'')})).join(' ');
+const t=norm((c.messages||[]).filter(function(m){return m.from==='visitor'}).map(function(m){return String(m.text||'')}).join(' '));
 let score=0;const tags=[];
 if(/(سعر|بكم|يكلف|تكلف)/.test(t)){score+=10;tags.push('سأل عن السعر')}
 if(/(توصيل|شحن|يوصل)/.test(t)){score+=15;tags.push('سأل عن التوصيل')}
@@ -689,20 +668,28 @@ function demoDocs(){return DEMO_TEXTS.map(function(t){return {agentId:'',chunks:
 function searchKB(q,agentId){
 const qt=tokens(q);if(!qt.length)return[];const hits=[];
 const s=ws();
-/* التزام صارم: إذا وُجدت معرفة جاهزة تُستخدم حصريًا — لا مصادر خارجية */
+/* التزام صارم: المعرفة الجاهزة فقط — لا مصادر خارجية */
 const ready=(s&&Array.isArray(s.kb))?s.kb.filter(function(k){return k.status==='ready'&&(!k.agentId||k.agentId===agentId)}):[];
-const src=ready.length?ready:(!s?demoDocs():[]);
-src.forEach(function(d){(d.chunks||[]).forEach(function(ch){let sc=0;qt.forEach(function(t){ch.toks.forEach(function(ct){if(ct.indexOf(t)>-1||t.indexOf(ct)>-1)sc++})});if(sc>0)hits.push({sc:sc,text:ch.text})})});
+const src=ready.length?ready:(s?[]:demoDocs());
+src.forEach(function(d){(d.chunks||[]).forEach(function(ch){
+var sc=0;
+qt.forEach(function(t){ch.toks.forEach(function(ct){
+var tt=t.length>3?t.replace(/^ال/,''):t;
+var cc=ct.length>3?ct.replace(/^ال/,''):ct;
+if(ct===t)sc+=3;
+else if(ct.indexOf(t)>-1||t.indexOf(ct)>-1)sc+=2;
+else if(tt.length>2&&cc.length>2&&(cc.indexOf(tt)>-1||tt.indexOf(cc)>-1))sc+=1;})});
+if(sc>0)hits.push({sc:sc,text:ch.text})})});
 return hits.sort(function(a,b){return b.sc-a.sc}).slice(0,2);}
 const HANDOFF=['موظف','انسان','بشري','شخص حقيقي','مختص','مسؤول'];
 function aiRespondLocal(text,agent,agentId){
 const t=norm(text);
 if(HANDOFF.some(function(k){return t.indexOf(norm(k))>-1}))return {text:'أكيد، حولتك للموظف المختص الآن ✋ سيتابع معك خلال دقائق.',handoff:true};
 if(/^(سلام|هلا|مرحبا|اهلا|هاي|صباح الخير|مساء الخير)/.test(t)&&t.length<15)return {text:'أهلًا وسهلًا 👋 كيف أقدر أساعدك؟'};
-if(t.indexOf('شكرا')>-1)return {text:'العفو 🤍 أي شيء ثاني أنا هنا.'};
+if(t.indexOf('شكرا')>-1&&t.length<25)return {text:'العفو 🤍 أي شيء ثاني أنا هنا.'};
 const hits=searchKB(text,agentId);
 if(hits.length&&hits[0].sc>=1)return {text:hits.map(function(h){return h.text}).join('\n')};
-/* لا هلوسة: لا إجابة خارج قاعدة المعرفة إطلاقًا */
+/* لا إجابات عامة خارج قاعدة المعرفة إطلاقًا */
 return {text:NO_INFO_MSG};}
 async function getAIReply(text,agent,widget,convo){
 if(isRemote()&&cfg&&apiBase()&&widget){
@@ -711,14 +698,14 @@ const res=await fetch(apiBase()+'/ai-respond',{method:'POST',headers:{'Content-T
 const j=await res.json().catch(function(){return{}});
 if(j&&j.handoff_locked)return {text:j.message||'المحادثة بيد فريق الدعم الآن.',system:true};
 if(j&&j.error==='limit')return {text:j.message||'تم تجاوز الحد الشهري لرسائل الذكاء الاصطناعي. الرجاء ترقية الخطة.',system:true};
-if(j&&j.error)return {text:j.message||'عذرًا، حصل خطأ مؤقت. حاول مرة ثانية.',system:false};
+if(j&&j.error){console.warn('ai-respond error → fallback للمحرك المحلي:',j.error);throw new Error(j.message||j.error)}
 if(j&&j.reply){if(j.handoff&&convo)convo.status='handoff';return {text:j.reply,handoff:!!j.handoff}}
 throw new Error('استجابة غير صالحة من الخادم');
-}catch(e){console.error('ai-respond fallback:',e)}
+}catch(e){console.warn('ai-respond fallback:',e&&e.message)}
 }
-return new Promise(function(resolve){setTimeout(function(){resolve(aiRespondLocal(text,agent,widget?widget.agentId:undefined))},700)});}
+return new Promise(function(resolve){setTimeout(function(){resolve(aiRespondLocal(text,agent,widget?widget.agentId:undefined))},600)});}
 /* ================================================================
-Knowledge Processing — التدفق الحقيقي (بدون نجاح وهمي)
+Knowledge Processing — التدفق الحقيقي
 الحالات: pending → uploading → processing → embedding → ready | error
 ================================================================ */
 function refreshKbUI(){var h=location.hash||'';if(h.indexOf('#/app/kb')===0||h.indexOf('#/onboarding')===0)route()}
@@ -764,6 +751,15 @@ res.links.forEach(function(l){queue.push(l)});
 if(!pages.length)throw new Error('الموقع لا يحتوي نصًا كافيًا — قد يعتمد على JavaScript في عرض المحتوى');
 doc.content=pages.join('\n').slice(0,60000);
 chunkify(doc);doc.pages=visited.size;doc.status='ready';doc.lastSync=now();}
+/* بديل يدوي عند فشل الزحف — حتى لا يفقد المستخدم مصدره */
+function urlFallbackModal(docId){
+var d=ws().kb.find(function(x){return x.id===docId});if(!d)return;
+modal('<h3 class="font-display font-bold text-lg mb-2">تعذر قراءة الموقع تلقائيًا</h3>'
++'<p class="text-xs text-ink-400 leading-6 mb-1">الرابط: <span class="ltr text-tiffany-300">'+esc(d.name)+'</span></p>'
++'<p class="text-xs text-ink-500 leading-6 mb-3">قد يمنع الموقع القراءة الآلية أو لا يتوفر اتصال كافٍ. الصق محتوى الموقع بنفسك وسيُضاف فورًا كمصدر معرفة جاهز.</p>'
++'<form id="f-urlfallback" class="space-y-3"><input type="hidden" name="docId" value="'+d.id+'">'
++'<textarea name="content" rows="9" required class="inp-s" placeholder="الصق هنا نصوص الموقع: المنتجات، الأسعار، الخدمات، السياسات، أوقات العمل..."></textarea>'
++'<div class="flex gap-2"><button class="btn-primary flex-1">حفظ كمصدر معرفة</button><button type="button" data-action="modal-close" class="btn-ghost">إلغاء</button></div></form>');}
 async function processUrl(url,doc){
 doc.status='processing';doc.error='';doc.content='جارٍ الزحف واستخراج المعلومات...';save();refreshKbUI();
 try{
@@ -781,15 +777,15 @@ toast('تم استخراج معلومات الموقع ✔ — '+doc.chunkCount+
 }catch(err){
 console.error('KB crawl error:',err);
 doc.status='error';doc.error=arErr(err.message||String(err));doc.content='فشل الزحف: '+doc.error;
-save();refreshKbUI();toast('فشل الزحف: '+doc.error,'err');}}
+save();refreshKbUI();
+toast('فشل الزحف التلقائي — أضف محتوى الموقع يدويًا','err');
+urlFallbackModal(doc.id);}}
 async function extractFileClient(file){
 const ext=(file.name.split('.').pop()||'').toLowerCase();
-/* نصوص صريحة */
 if(ext==='txt'||ext==='csv'||ext==='md'){
 const t=await file.text();
 if(t&&t.trim())return t;
 throw new Error('الملف فارغ أو بترميز غير مدعوم');}
-/* PDF — تحميل ديناميكي للمكتبة + بديل آمن */
 if(ext==='pdf'){
 const ok=await ensureLib(function(){return !!window.pdfjsLib},['https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js','https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js']);
 if(ok){
@@ -800,15 +796,13 @@ const pdf=await window.pdfjsLib.getDocument({data:buf}).promise;
 let out='';
 for(let i=1;i<=Math.min(pdf.numPages,200);i++){const page=await pdf.getPage(i);const tc=await page.getTextContent();out+=tc.items.map(function(it){return it.str}).join(' ')+'\n';}
 if(out.trim())return out;
-}catch(e){console.warn('pdf primary extraction failed:',e)}}
-/* Fallback: محاولة استخراج نصي مبسّط من بايتات الملف */
+}catch(e){console.warn('pdf primary failed:',e)}}
 try{
 const raw=await file.text();
 const naive=raw.replace(/[^\u0600-\u06FFa-zA-Z0-9 \n.,()\-:%]/g,' ').replace(/ {3,}/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
 if(naive.length>200)return naive;
 }catch(e2){}
-throw new Error('تعذر استخراج النص من ملف PDF — إن كان الملف مصورًا (صور ضوئية) فحوّله إلى PDF نصي أولًا');}
-/* DOCX — mammoth + بديل JSZip */
+throw new Error('تعذر استخراج النص من ملف PDF — إن كان صورًا ضوئية فحوّله إلى PDF نصي أولًا');}
 if(ext==='docx'){
 const ok=await ensureLib(function(){return !!window.mammoth},['https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js','https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js']);
 if(ok){
@@ -816,7 +810,7 @@ try{
 const buf=await file.arrayBuffer();
 const r=await window.mammoth.extractRawText({arrayBuffer:buf});
 if(r.value&&r.value.trim())return r.value;
-}catch(e){console.warn('mammoth extraction failed:',e)}}
+}catch(e){console.warn('mammoth failed:',e)}}
 const zok=await ensureLib(function(){return !!window.JSZip},['https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js']);
 if(zok){
 try{
@@ -830,7 +824,6 @@ const txt=xml.replace(/<w:tab[^>]*\/>/g,'\t').replace(/<\/w:p>/g,'\n').replace(/
 if(txt)return txt;}
 }catch(e2){console.warn('jszip docx fallback failed:',e2)}}
 throw new Error('تعذر استخراج النص من ملف DOCX — جرّب تصديره كنص عادي (.txt)');}
-/* Excel — SheetJS + بديل JSZip */
 if(ext==='xlsx'||ext==='xls'){
 const ok=await ensureLib(function(){return !!window.XLSX},['https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js','https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js']);
 if(ok){
@@ -839,7 +832,7 @@ const buf=await file.arrayBuffer();
 const wb=window.XLSX.read(buf,{type:'array'});
 let out='';wb.SheetNames.forEach(function(sn){out+='\n['+sn+']\n'+window.XLSX.utils.sheet_to_csv(wb.Sheets[sn])});
 if(out.trim())return out;
-}catch(e){console.warn('xlsx extraction failed:',e)}}
+}catch(e){console.warn('xlsx failed:',e)}}
 const zok2=await ensureLib(function(){return !!window.JSZip},['https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js']);
 if(zok2){
 try{
@@ -853,7 +846,6 @@ out=m.map(function(x){return x.replace(/<[^>]+>/g,'')}).join('\n');}
 if(out.trim())return out;
 }catch(e2){console.warn('jszip xlsx fallback failed:',e2)}}
 throw new Error('تعذر استخراج البيانات من ملف Excel — جرّب تصديره بصيغة CSV');}
-/* Fallback عام: محاولة قراءة الملف كنص لأي صيغة غير معروفة */
 try{
 const t=await file.text();
 const clean=t.replace(/[^\u0600-\u06FFa-zA-Z0-9 \n.,()\-:%\r]/g,' ');
@@ -885,7 +877,7 @@ doc.status='processing';save();refreshKbUI();
 const text=await extractFileClient(file);
 if(!text||!text.trim())throw new Error('الملف لا يحتوي نصًا قابلًا للاستخراج');
 doc.content=text.slice(0,120000);chunkify(doc);doc.status='ready';doc.lastSync=now();
-save();refreshKbUI();toast('تمت معالجة الملف محليًا ✔ — '+doc.chunkCount+' مقطع','ok');
+save();refreshKbUI();toast('تمت معالجة الملف ✔ — '+doc.chunkCount+' مقطع أصبح جاهزًا للويدجت','ok');
 }catch(err){
 console.error('KB file error:',err);
 doc.status='error';doc.error=arErr(err.message||String(err));doc.content='فشلت المعالجة: '+doc.error;
@@ -902,7 +894,7 @@ doc.status='ready';doc.chunkCount=j.chunks||0;doc.lastSync=now();
 save();refreshKbUI();toast('تم حفظ المعرفة ✔ — '+doc.chunkCount+' مقطع','ok');return true;
 }
 chunkify(doc);doc.status='ready';doc.lastSync=now();
-save();refreshKbUI();toast('تم حفظ المعرفة محليًا ✔ — '+doc.chunkCount+' مقطع','ok');return true;
+save();refreshKbUI();toast('تم حفظ المعرفة ✔ — '+doc.chunkCount+' مقطع أصبح جاهزًا للويدجت','ok');return true;
 }catch(err){
 console.error('KB text error:',err);
 doc.status='error';doc.error=arErr(err.message||String(err));
@@ -917,12 +909,11 @@ if(!resp.ok||!j||j.error)throw new Error(arErr((j&&j.message)||('فشل إعاد
 doc.status='ready';doc.chunkCount=j.chunks||0;doc.lastSync=now();
 save();refreshKbUI();toast('تمت إعادة المعالجة ✔','ok');return;
 }
-chunkify(doc);doc.status='ready';doc.lastSync=now();save();refreshKbUI();toast('تمت إعادة المعالجة محليًا ✔','ok');
+chunkify(doc);doc.status='ready';doc.lastSync=now();save();refreshKbUI();toast('تمت إعادة المعالجة ✔ — '+doc.chunkCount+' مقطع','ok');
 }catch(err){console.error(err);doc.status='error';doc.error=arErr(err.message||String(err));save();refreshKbUI();toast('فشلت إعادة المعالجة: '+doc.error,'err');}}
 async function reProcessFile(doc){
 if(!doc.storagePath){
-/* محليًا: لا يوجد ملف مرفوع — أعد المحاولة إن وُجد محتوى نصي */
-if(doc.content&&!/^فشلت|فشل/.test(doc.content)){doc.status='processing';save();refreshKbUI();chunkify(doc);doc.status='ready';doc.lastSync=now();save();refreshKbUI();toast('تمت إعادة المعالجة محليًا ✔','ok');return}
+if(doc.content&&!/فشلت|فشل/.test(doc.content)){doc.status='processing';save();refreshKbUI();chunkify(doc);doc.status='ready';doc.lastSync=now();save();refreshKbUI();toast('تمت إعادة المعالجة ✔','ok');return}
 toast('لا يوجد ملف مرفوع لهذا المصدر — ارفع الملف من جديد','err');return}
 doc.status='processing';doc.error='';save();refreshKbUI();
 try{
@@ -933,7 +924,7 @@ if(!resp.ok||!j||j.error)throw new Error(arErr((j&&j.message)||('فشل المع
 doc.status='ready';doc.chunkCount=j.chunks||0;doc.lastSync=now();doc.content='تم استخراج النص وإنشاء '+(j.chunks||0)+' مقطعًا.';
 save();refreshKbUI();toast('تمت إعادة المعالجة ✔','ok');return;
 }
-doc.status='error';doc.error='إعادة معالجة الملفات تتطلب الاتصال بالخادم';save();refreshKbUI();toast(doc.error,'err');
+doc.status='error';doc.error='إعادة معالجة الملفات المرفوعة تتطلب الاتصال بالخادم';save();refreshKbUI();toast(doc.error,'err');
 }catch(err){console.error(err);doc.status='error';doc.error=arErr(err.message||String(err));save();refreshKbUI();toast('فشلت إعادة المعالجة: '+doc.error,'err');}}
 /* ================= Widget UI ================= */
 function widgetMarkup(w,agent,opts){
@@ -1025,13 +1016,13 @@ function go(h){if(location.hash===h)route();else location.hash=h}
 function route(){
 const h=location.hash||'#/';
 try{
-if(h.indexOf('#/app')===0){if(!me()){go('#/login');return}renderDash(h)}
+if(h.indexOf('#/app')===0){if(!me()){toast('يجب تسجيل الدخول أولًا للوصول للوحة التحكم','err');go('#/login');return}renderDash(h)}
 else if(h==='#/login')renderAuth('login');
 else if(h==='#/signup')renderAuth('signup');
 else if(h==='#/forgot')renderAuth('forgot');
 else if(h.indexOf('#/setup')===0)renderSetup();
-else if(h.indexOf('#/test')===0)renderTest();
-else if(h.indexOf('#/onboarding')===0)renderOnboarding();
+else if(h.indexOf('#/test')===0){if(!me()){toast('سجّل الدخول أولًا لفتح صفحة الاختبار','err');go('#/login');return}renderTest()}
+else if(h.indexOf('#/onboarding')===0){if(!me()){toast('يجب تسجيل الدخول أولًا','err');go('#/login');return}renderOnboarding()}
 else renderLanding();
 }catch(err){console.error(err);const app=document.getElementById('app');if(app)app.innerHTML='<div class="p-20 text-center text-ink-400">حدث خطأ غير متوقع. <a class="text-tiffany-400 underline" href="#/">العودة للرئيسية</a></div>'}}
 window.addEventListener('hashchange',route);
@@ -1050,7 +1041,7 @@ app.innerHTML=
 +'<div class="inline-flex items-center gap-2 text-xs text-tiffany-300 bg-tiffany-500/10 border border-tiffany-500/30 rounded-full px-3 py-1.5 mb-5">'+icon('spark','w-4 h-4')+' إدارة ســوشـــيــــال — منصة موظفي الذكاء الاصطناعي للأعمال</div>'
 +'<h1 class="font-display font-extrabold text-4xl md:text-5xl leading-[1.3] mb-5">أضف <span class="text-tiffany-400">موظف AI</span> إلى موقعك خلال دقائق</h1>'
 +'<p class="text-ink-300 text-lg leading-8 mb-8">أنشئ وكلاء ذكاء اصطناعي مدرّبين على بيانات عملك فقط — بدون اختراع معلومات — خصّص ويدجت الدردشة، وانسخ سطرًا واحدًا من الكود إلى موقعك.</p>'
-+'<div class="flex flex-wrap gap-3"><button data-action="go" data-to="'+(me()?'#/app':'#/signup')+'" class="btn-primary !text-base !px-7 !py-3.5">ابدأ مجانًا</button><button data-action="scroll" data-to="#how" class="btn-ghost !text-base !px-7 !py-3.5">شاهد كيف يعمل</button></div>'
++'<div class="flex flex-wrap gap-3"><button data-action="go" data-to="'+(me()?'#/app':'#/signup')+'" class="btn-primary !text-base !px-7 !py-3.5">'+(me()?'افتح لوحة التحكم':'ابدأ مجانًا')+'</button><button data-action="scroll" data-to="#how" class="btn-ghost !text-base !px-7 !py-3.5">شاهد كيف يعمل</button></div>'
 +'<div class="flex flex-wrap gap-x-6 gap-y-2 mt-8 text-xs text-ink-400"><span class="flex items-center gap-1.5">'+icon('check','w-4 h-4 text-tiffany-500')+' Grounded AI — لا يخترع أسعارًا ولا منتجات</span><span class="flex items-center gap-1.5">'+icon('check','w-4 h-4 text-tiffany-500')+' معرفة معزولة لكل Agent</span><span class="flex items-center gap-1.5">'+icon('shield','w-4 h-4 text-tiffany-500')+' المفاتيح والأسرار لا تغادر الخادم</span></div></div>'
 +'<div class="relative fadeUp"><div class="glass rounded-2xl p-4 shadow-soft">'
 +'<div class="flex items-center gap-1.5 pb-3 border-b border-ink-800 mb-3"><span class="w-2.5 h-2.5 rounded-full bg-red-400"></span><span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span><span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span><span class="ltr text-[11px] text-ink-500 px-2 font-mono">your-store.com</span></div>'
@@ -1060,14 +1051,14 @@ app.innerHTML=
 +'<section id="how" class="relative z-10 max-w-7xl mx-auto px-4 py-20"><h2 class="sec-title">كيف يعمل؟</h2><p class="sec-sub">أربع خطوات من التسجيل إلى موظف AI يتحدث مع عملائك.</p><div class="grid md:grid-cols-4 gap-5 mt-10">'
 +[['bot','أنشئ Agent','الاسم والتعليمات واللهجة والنموذج ونطاق الإجابة.'],['book','اربط المعرفة','موقعك الإلكتروني، ملفاتك، أو نصوص يدوية — معزولة لكل Agent.'],['widget','خصّص الويدجت','كل الألوان والأبعاد والسلوك مع معاينة حية فورية.'],['code','انسخ الكود','سطر واحد في أي موقع — والمحادثات تصل للوحة التحكم.']].map(function(s,i){return '<div class="glass rounded-2xl p-6 hover:border-tiffany-500/40 transition relative"><div class="absolute top-4 left-4 font-display font-extrabold text-ink-700 text-2xl">'+(i+1)+'</div><div class="w-11 h-11 rounded-xl bg-tiffany-500/10 text-tiffany-400 border border-tiffany-500/30 flex items-center justify-center mb-4">'+icon(s[0])+'</div><h3 class="font-display font-bold mb-2">'+s[1]+'</h3><p class="text-sm text-ink-400 leading-6">'+s[2]+'</p></div>'}).join('')+'</div></section>'
 +'<section id="features" class="relative z-10 bg-ink-900/60 border-y border-ink-800 py-20"><div class="max-w-7xl mx-auto px-4"><h2 class="sec-title">مميزات بمستوى عالمي</h2><p class="sec-sub">كل ما تحتاجه لتشغيل موظفين رقميين على موقعك.</p><div class="grid md:grid-cols-3 gap-5 mt-10">'
-+[['shield','Grounded AI','يجيب فقط من قاعدة معرفتك. إذا لم توجد المعلومة يقول ذلك بوضوح — لا يخترع أسعارًا ولا منتجات ولا مواعيد.'],['book','Knowledge Base حقيقية','زحف موقعك (حتى 10 صفحات)، رفع PDF/DOCX/CSV/Excel، نصوص يدوية — مع مزامنة بدون تكرار.'],['users','CRM تلقائي','تصنيف العملاء (مشتري/مهتم/محتمل)، Lead Score من 0 إلى 100، ووسوم تلقائية تتطور مع المحادثة.'],['bolt','Widget قابل للتخصيص كليًا','ألوان الرأس والخلفية والرسائل، الأبعاد، الظل، الإطار، رسالة عدم الاتصال — معاينة حية.'],['chat','محادثات حية + Handoff','كل رسالة تظهر فورًا في لوحة التحكم، وتحويل بشري يوقف الـ AI حتى يعيد الموظف تفعيله.'],['db','جلسة دائمة + عزل كامل','تسجيل دخولك يبقى محفوظًا، وكل مساحة عمل معزولة عبر Supabase RLS.']].map(function(f){return '<div class="rounded-2xl p-6 bg-ink-850 border border-ink-800 hover:border-tiffany-500/40 hover:-translate-y-0.5 transition"><div class="w-10 h-10 rounded-lg bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center mb-4">'+icon(f[0])+'</div><h3 class="font-display font-bold mb-1.5">'+f[1]+'</h3><p class="text-sm text-ink-400 leading-6">'+f[2]+'</p></div>'}).join('')+'</div></div></section>'
++[['shield','Grounded AI','يجيب فقط من قاعدة معرفتك. إذا لم توجد المعلومة يقول ذلك بوضوح — لا يخترع أسعارًا ولا منتجات ولا مواعيد.'],['book','Knowledge Base حقيقية','زحف موقعك (حتى 10 صفحات)، رفع PDF/DOCX/CSV/Excel، نصوص يدوية — مع بديل يدوي عند فشل الزحف.'],['users','CRM تلقائي','تصنيف العملاء (مشتري/مهتم/محتمل)، Lead Score من 0 إلى 100، ووسوم تلقائية تتطور مع المحادثة.'],['bolt','Widget قابل للتخصيص كليًا','ألوان الرأس والخلفية والرسائل، الأبعاد، الظل، الإطار، رسالة عدم الاتصال — معاينة حية.'],['chat','محادثات حية + Handoff','كل رسالة تظهر فورًا في لوحة التحكم، وتحويل بشري يوقف الـ AI حتى يعيد الموظف تفعيله.'],['db','عمل متصل أو محلي','مزامنة كاملة مع الخادم عند توفره، ووضع محلي آمن عند انقطاع الاتصال.']].map(function(f){return '<div class="rounded-2xl p-6 bg-ink-850 border border-ink-800 hover:border-tiffany-500/40 hover:-translate-y-0.5 transition"><div class="w-10 h-10 rounded-lg bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center mb-4">'+icon(f[0])+'</div><h3 class="font-display font-bold mb-1.5">'+f[1]+'</h3><p class="text-sm text-ink-400 leading-6">'+f[2]+'</p></div>'}).join('')+'</div></div></section>'
 +'<section id="usecases" class="bg-ink-900/60 border-y border-ink-800 py-20"><div class="max-w-7xl mx-auto px-4"><h2 class="sec-title">لمن بُنيت إدارة ســوشـــيــــال؟</h2><p class="sec-sub">أي نشاط يريد الرد الفوري على عملائه — على مدار الساعة.</p><div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-10">'
 +['المتاجر الإلكترونية','الشركات','العيادات','المطاعم','الصالونات','العقارات','مكاتب الخدمات','مراكز التدريب'].map(function(u){return '<div class="rounded-xl bg-ink-850 border border-ink-800 p-5 text-center text-sm text-ink-200 hover:border-tiffany-500/40 hover:text-tiffany-300 transition">'+u+'</div>'}).join('')+'</div></div></section>'
 +'<section id="pricing" class="max-w-7xl mx-auto px-4 py-20"><h2 class="sec-title">أسعار واضحة</h2><p class="sec-sub">ابدأ مجانًا مع 8 Agents، وترقَّ عندما تكبر.</p><div class="grid md:grid-cols-3 gap-5 mt-10">'
 +Object.keys(PLANS).map(function(k){var p=PLANS[k];return '<div class="rounded-2xl p-7 border relative '+(k==='growth'?'border-tiffany-500/60 bg-tiffany-500/5 shadow-glow':'border-ink-800 bg-ink-850')+'">'+(k==='growth'?'<span class="absolute -top-3 right-6 text-[11px] font-bold bg-tiffany-500 text-ink-950 rounded-full px-3 py-1">الأكثر شيوعًا</span>':'')+'<h3 class="font-display font-bold text-lg">'+p.name+'</h3><div class="my-4"><span class="font-display font-extrabold text-4xl">'+p.price+'</span> <span class="text-ink-400 text-sm">ريال / شهريًا</span></div><ul class="space-y-2.5 text-sm text-ink-300 mb-7">'+p.feat.map(function(f){return '<li class="flex gap-2">'+icon('check','w-4 h-4 text-tiffany-500 mt-0.5')+' '+f+'</li>'}).join('')+'</ul><button data-action="go" data-to="#/signup" class="'+(k==='growth'?'btn-primary':'btn-ghost')+' w-full">'+(k==='free'?'ابدأ مجانًا':'اشترك')+'</button></div>'}).join('')+'</div></section>'
 +'<section id="faq" class="max-w-4xl mx-auto px-4 pb-20"><h2 class="sec-title">الأسئلة الشائعة</h2><div class="mt-8 space-y-3">'
-+[['هل يخترع الـ AI معلومات غير موجودة؟','لا. يعمل بمبدأ Grounded AI الصارم: يجيب فقط من قاعدة معرفتك، وإذا لم يجد المعلومة يرد نصًا: «عذراً، هذه المعلومة غير متوفرة لدي حالياً، هل أستطيع تحويلك لأحد موظفي الدعم؟».'],['هل تختلط معرفة وكلاء مختلفين؟','لا. كل مصدر معرفة يرتبط بـ Agent محدد، والاسترجاع يتم من معرفة ذلك الـ Agent فقط.'],['هل يبقى تسجيل الدخول محفوظًا؟','نعم، جلستك تُحفظ تلقائيًا ولا تحتاج لتسجيل الدخول في كل زيارة.'],['ماذا يحدث عندما يطلب العميل موظفًا؟','تتحول المحادثة إلى Human Handoff ويتوقف الـ AI عن الرد حتى يعيد الموظف تفعيله.'],['هل بياناتي معزولة؟','نعم، سياسات RLS على مستوى قاعدة البيانات تربط كل سجل بمساحة عملك فقط.']].map(function(f){return '<details class="faq glass rounded-xl group"><summary class="flex items-center justify-between cursor-pointer px-5 py-4 font-semibold text-sm list-none">'+f[0]+'<span class="text-tiffany-400 transition group-open:rotate-45 text-xl leading-none">+</span></summary><p class="px-5 pb-5 text-sm text-ink-400 leading-7">'+f[1]+'</p></details>'}).join('')+'</div></section>'
-+'<section class="max-w-5xl mx-auto px-4 pb-24"><div class="rounded-3xl p-10 md:p-14 text-center relative overflow-hidden border border-tiffany-500/30 bg-gradient-to-b from-tiffany-500/15 to-transparent"><h2 class="font-display font-extrabold text-3xl md:text-4xl mb-4">جاهز توظّف أول موظف AI لديك؟</h2><p class="text-ink-300 mb-8">انضم إلى إدارة ســوشـــيــــال الآن وأنشئ وكيلك الأول خلال دقائق — مجانًا.</p><button data-action="go" data-to="#/signup" class="btn-primary !text-base !px-9 !py-4">ابدأ مجانًا الآن</button></div></section>'
++[['هل يخترع الـ AI معلومات غير موجودة؟','لا. يعمل بمبدأ Grounded AI الصارم: يجيب فقط من قاعدة معرفتك، وإذا لم يجد المعلومة يرد نصًا: «عذراً، هذه المعلومة غير متوفرة لدي حالياً، هل أستطيع تحويلك لأحد موظفي الدعم؟».'],['ماذا لو انقطع الاتصال بالخادم؟','يستمر التطبيق بالوضع المحلي تلقائيًا: بياناتك تُحفظ على جهازك وتعاد المزامنة بضغطة زر عند عودة الاتصال.'],['ماذا لو فشل زحف رابط موقعي؟','يفتح لك صندوقًا لتلصق محتوى الموقع يدويًا، فيُضاف فورًا كمصدر معرفة جاهز.'],['ماذا يحدث عندما يطلب العميل موظفًا؟','تتحول المحادثة إلى Human Handoff ويتوقف الـ AI عن الرد حتى يعيد الموظف تفعيله.'],['هل بياناتي معزولة؟','نعم، سياسات RLS على مستوى قاعدة البيانات تربط كل سجل بمساحة عملك فقط، ومعرفة كل Agent معزولة عن غيره.']].map(function(f){return '<details class="faq glass rounded-xl group"><summary class="flex items-center justify-between cursor-pointer px-5 py-4 font-semibold text-sm list-none">'+f[0]+'<span class="text-tiffany-400 transition group-open:rotate-45 text-xl leading-none">+</span></summary><p class="px-5 pb-5 text-sm text-ink-400 leading-7">'+f[1]+'</p></details>'}).join('')+'</div></section>'
++'<section class="max-w-5xl mx-auto px-4 pb-24"><div class="rounded-3xl p-10 md:p-14 text-center relative overflow-hidden border border-tiffany-500/30 bg-gradient-to-b from-tiffany-500/15 to-transparent"><h2 class="font-display font-extrabold text-3xl md:text-4xl mb-4">جاهز توظّف أول موظف AI لديك؟</h2><p class="text-ink-300 mb-8">انضم إلى إدارة ســوشـــيــــال الآن وأنشئ وكيلك الأول خلال دقائق — مجانًا مع 8 Agents.</p><button data-action="go" data-to="#/signup" class="btn-primary !text-base !px-9 !py-4">ابدأ مجانًا الآن</button></div></section>'
 +'<footer class="border-t border-ink-800 py-10 text-center text-sm text-ink-500"><div class="flex items-center justify-center gap-2 mb-3">'+brandHTML()+'</div>منصة إدارة ســوشـــيــــال لموظفي الذكاء الاصطناعي — كل الحقوق محفوظة '+new Date().getFullYear()+'</footer>';
 var heroHost=document.querySelector('#hero-widget .pointer-events-auto');
 if(heroHost){
@@ -1079,18 +1070,17 @@ mountWidget(heroHost,demoW,heroAgent,{fixed:false,credit:false});}}
 function renderAuth(mode){
 var titles={login:['مرحبًا بعودتك','سجّل دخولك لمتابعة إدارة موظفيك الرقميين.'],signup:['أنشئ حسابك','مساحة عمل معزولة جاهزة خلال ثوانٍ.'],forgot:['استعادة كلمة المرور','أدخل بريدك وسنرسل رابط إعادة التعيين.']};
 var form='';
-var demoBtn='<button type="button" data-action="demo-enter" class="btn-ghost w-full !py-3 !border-dashed text-ink-300">'+icon('eye','w-4 h-4')+' استكشاف المنصة بدون حساب (وضع تجريبي — يبقى محفوظًا)</button>';
+var demoBtn='<button type="button" data-action="demo-enter" class="btn-ghost w-full !py-3 !border-dashed text-ink-300">'+icon('eye','w-4 h-4')+' الدخول كضيف بدون حساب (وضع تجريبي — يبقى محفوظًا)</button>';
 if(mode==='login')form='<form id="f-login" class="space-y-4"><label class="lbl">البريد الإلكتروني<input name="email" type="email" required class="inp" placeholder="you@company.com"></label><label class="lbl">كلمة المرور<input name="pass" type="password" required class="inp" placeholder="••••••••"></label><div class="flex items-center justify-between text-sm"><a href="#/forgot" class="text-tiffany-400 hover:underline">نسيت كلمة المرور؟</a></div><button class="btn-primary w-full !py-3" id="b-login">تسجيل الدخول</button><p class="text-sm text-ink-400 text-center">ليس لديك حساب؟ <a class="text-tiffany-400 font-semibold" href="#/signup">أنشئ حسابًا</a></p></form><div class="my-4 flex items-center gap-3 text-[11px] text-ink-600"><span class="flex-1 h-px bg-ink-800"></span>أو<span class="flex-1 h-px bg-ink-800"></span></div>'+demoBtn;
 if(mode==='signup')form='<form id="f-signup" class="space-y-4"><label class="lbl">الاسم الكامل<input name="name" required class="inp" placeholder="اسمك"></label><label class="lbl">اسم النشاط / الشركة<input name="company" required class="inp" placeholder="مثال: متجر النخبة"></label><label class="lbl">نوع النشاط<select name="type" class="inp">'+['متجر إلكتروني','شركة','عيادة','مطعم','صالون','عقارات','مكتب خدمات','مركز تدريب','أخرى'].map(function(t){return '<option>'+t+'</option>'}).join('')+'</select></label><label class="lbl">البريد الإلكتروني<input name="email" type="email" required class="inp" placeholder="you@company.com"></label><label class="lbl">كلمة المرور<input name="pass" type="password" minlength="6" required class="inp" placeholder="6 أحرف على الأقل"></label><button class="btn-primary w-full !py-3" id="b-signup">إنشاء الحساب والبدء</button><p class="text-sm text-ink-400 text-center">لديك حساب؟ <a class="text-tiffany-400 font-semibold" href="#/login">سجّل دخولك</a></p></form><div class="my-4 flex items-center gap-3 text-[11px] text-ink-600"><span class="flex-1 h-px bg-ink-800"></span>أو<span class="flex-1 h-px bg-ink-800"></span></div>'+demoBtn;
 if(mode==='forgot')form='<form id="f-forgot" class="space-y-4"><label class="lbl">البريد الإلكتروني<input name="email" type="email" required class="inp" placeholder="you@company.com"></label><button class="btn-primary w-full !py-3">إرسال رابط الاستعادة</button><p class="text-sm text-ink-400 text-center"><a class="text-tiffany-400" href="#/login">العودة لتسجيل الدخول</a></p></form>';
 var modeBadge=isRemote()
 ?'<div class="flex items-center gap-2 text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-3 py-1.5 mb-6 w-fit">'+icon('db','w-3.5 h-3.5')+' متصل بقاعدة بيانات Supabase — جلستك ستبقى محفوظة</div>'
-:(PROD?'<div class="flex items-center gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1.5 mb-6 w-fit">'+icon('shield','w-3.5 h-3.5')+' التسجيل الحقيقي يتطلب اتصال الخادم — <a href="#/setup" class="underline">اربط Supabase</a> أو جرّب الوضع التجريبي</div>'
-:'<div class="flex items-center gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1.5 mb-6 w-fit">'+icon('bolt','w-3.5 h-3.5')+' وضع تطوير محلي</div>');
+:'<div class="flex items-center gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1.5 mb-6 w-fit">'+icon('bolt','w-3.5 h-3.5')+' وضع محلي — الحسابات والبيانات تُحفظ على هذا الجهاز. <a href="#/setup" class="underline">اربط خادمًا حقيقيًا</a> للمزامنة</div>';
 document.getElementById('app').innerHTML='<div class="min-h-screen grid lg:grid-cols-2">'
 +'<div class="hidden lg:flex flex-col justify-between p-10 bg-ink-900 border-l border-ink-800 relative overflow-hidden"><div class="grid-bg absolute inset-0"></div>'
 +'<a href="#/" class="relative flex items-center gap-2 font-display font-extrabold text-lg">'+brandHTML()+'</a>'
-+'<div class="relative max-w-md"><h2 class="font-display font-extrabold text-3xl leading-snug mb-4">موظف AI لا ينام،<br><span class="text-tiffany-400">يرد على عملائك 24/7</span></h2><p class="text-ink-400 leading-7">Grounded AI + Knowledge Base معزولة لكل Agent + CRM تلقائي — والأتمتة تعمل بصمت في الخلفية.</p></div>'
++'<div class="relative max-w-md"><h2 class="font-display font-extrabold text-3xl leading-snug mb-4">موظف AI لا ينام،<br><span class="text-tiffany-400">يرد على عملائك 24/7</span></h2><p class="text-ink-400 leading-7">Grounded AI + Knowledge Base معزولة لكل Agent + CRM تلقائي — يعمل متصلًا أو محليًا عند انقطاع الخادم.</p></div>'
 +'<p class="relative text-xs text-ink-600">© إدارة ســوشـــيــــال</p></div>'
 +'<div class="flex items-center justify-center p-6"><div class="w-full max-w-md fadeUp">'
 +'<a href="#/" class="flex items-center gap-2 font-display font-extrabold text-lg mb-8 lg:hidden">'+brandHTML()+'</a>'
@@ -1103,15 +1093,15 @@ function engSource(k){var el=document.getElementById(ENG_SRC[k]);return el?el.te
 var ENG_STEPS='<ol class="list-decimal pr-5 space-y-3 text-sm text-ink-300 leading-7"><li>شغّل ترحيل المرحلة 2 ثم «عمود agent_id» ثم «٤. العزل الصارم والتشخيص» في SQL Editor.</li><li>انشر الدوال الخمس (ai-respond، verify-widget، kb-process، kb-crawl، kb-ingest) بعد نسخها إلى مجلدات <span class="ltr">supabase/functions</span>.</li><li>ثبّت السر: <span class="ltr">supabase secrets set GEMINI_API_KEY=...</span></li><li>ارفع <span class="ltr">widget.js</span> على CDN واستبدل مصدر السكربت في كود التضمين.</li><li>جرّب من صفحة Knowledge Base: ملف + نص يدوي + رابط موقع — وتابع الحالات الحقيقية (رفع → معالجة → تضمينات → جاهز).</li><li>استعلم عن <span class="ltr">kb_diagnostics</span> من SQL Editor للتحقق من عدد المقاطع والتضمينات لكل مستند.</li></ol>';
 function renderSetup(){
 var connected=isRemote();
-var phases=[['Supabase + قاعدة البيانات + RLS',true],['حفظ الودجات/الوكلاء مباشرة في Supabase',true],['widget.js + verify-widget + ai-respond (RAG)',true],['Knowledge Base: زحف + ملفات + نصوص (تدفق حقيقي بالحالات)',true],['عزل المعرفة لكل Agent + منع الإجابات العامة',true],['CRM: تصنيف + Lead Score + وسوم تلقائية',true],['معالج تهيئة (Onboarding) من 8 خطوات',true],['Billing + دفع حقيقي + إشعارات بريد',false]];
+var phases=[['Supabase + قاعدة البيانات + RLS',true],['حفظ الودجات/الوكلاء مباشرة في Supabase',true],['widget.js + verify-widget + ai-respond (RAG)',true],['Knowledge Base: زحف + ملفات + نصوص + بديل يدوي',true],['عزل المعرفة لكل Agent + منع الإجابات العامة',true],['CRM: تصنيف + Lead Score + وسوم تلقائية',true],['معالج تهيئة (Onboarding) من 8 خطوات',true],['وضع محلي آمن عند انقطاع الخادم + إعادة مزامنة',true],['Billing + دفع حقيقي + إشعارات بريد',false]];
 document.getElementById('app').innerHTML='<div class="min-h-screen max-w-4xl mx-auto px-4 py-10">'
 +'<div class="flex items-center justify-between mb-8 flex-wrap gap-3"><a href="#/" class="flex items-center gap-2 font-display font-extrabold text-lg">'+brandHTML()+'</a><div class="flex gap-2">'+(me()?'<button data-action="go" data-to="#/app" class="btn-ghost !py-2 text-sm">لوحة التحكم</button>':'')+'<a href="#/" class="btn-ghost !py-2 text-sm">الرئيسية</a></div></div>'
 +'<h1 class="font-display font-extrabold text-3xl mb-2">الخلفية والمحرك</h1>'
-+'<p class="text-ink-400 text-sm leading-7 mb-8">كل الكود اللازم لتشغيل النظام مع عملاء حقيقيين: الترحيلات، الدوال، الويدجت، وخطوات النشر.</p>'
++'<p class="text-ink-400 text-sm leading-7 mb-8">كل الكود اللازم لتشغيل النظام مع عملاء حقيقيين: الترحيلات، الدوال، الويدجت، وخطوات النشر. بدون خادم يعمل التطبيق بالوضع المحلي الكامل.</p>'
 +'<div class="grid md:grid-cols-[1fr_280px] gap-5 items-start"><div class="space-y-5">'
-+'<div class="glass rounded-2xl p-6"><div class="flex items-center justify-between mb-4"><h3 class="font-display font-bold flex items-center gap-2">'+icon('db','w-5 h-5 text-tiffany-400')+' اتصال Supabase</h3>'+(connected?'<span class="text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-3 py-1">● متصل</span>':'<span class="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1">● غير متصل</span>')+'</div>'
++'<div class="glass rounded-2xl p-6"><div class="flex items-center justify-between mb-4"><h3 class="font-display font-bold flex items-center gap-2">'+icon('db','w-5 h-5 text-tiffany-400')+' اتصال Supabase</h3>'+(connected?'<span class="text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-3 py-1">● متصل</span>':'<span class="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-full px-3 py-1">● غير متصل (وضع محلي)</span>')+'</div>'
 +'<form id="f-setup" class="space-y-3"><label class="lbl2">Supabase Project URL<input name="url" class="inp-s ltr" placeholder="https://xxxx.supabase.co" value="'+esc((cfg&&cfg.url)||'')+'" required></label><label class="lbl2">Anon Public Key<input name="key" class="inp-s ltr" placeholder="eyJhbGciOi..." value="'+esc((cfg&&cfg.key)||'')+'" required></label>'
-+'<div class="flex gap-2 flex-wrap"><button class="btn-primary">حفظ وفحص الاتصال</button>'+(connected?'<button type="button" data-action="sb-disconnect" class="btn-ghost !border-red-500/40 !text-red-300">فصل الاتصال</button>':'')+'</div></form></div>'
++'<div class="flex gap-2 flex-wrap"><button class="btn-primary">حفظ وفحص الاتصال</button>'+(connected?'<button type="button" data-action="sb-disconnect" class="btn-ghost !border-red-500/40 !text-red-300">فصل الاتصال والعودة للوضع المحلي</button>':'')+'</div></form></div>'
 +'<div class="glass rounded-2xl p-6"><div class="flex items-center justify-between mb-4 flex-wrap gap-2"><h3 class="font-display font-bold flex items-center gap-2">'+icon('bolt','w-5 h-5 text-tiffany-400')+' ملفات التنفيذ</h3><span class="text-[11px] text-tiffany-300 bg-tiffany-500/10 border border-tiffany-500/30 rounded-full px-3 py-1">جاهزة للنشر</span></div>'
 +'<div class="flex flex-wrap gap-2 mb-4">'+ENG_TABS.map(function(t){return '<button data-action="eng-tab" data-id="'+t[0]+'" class="eng-tab '+(engTab===t[0]?'on':'')+'">'+t[1]+'</button>'}).join('')+'</div><div id="eng-view"></div></div></div>'
 +'<div class="space-y-5"><div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">مراحل الإطلاق</h3><div class="space-y-2.5">'+phases.map(function(p,i){return '<div class="flex items-center gap-2.5 text-sm"><span class="w-6 h-6 rounded-full flex items-center justify-center text-[11px] flex-none '+(p[1]?'bg-tiffany-500 text-ink-950 font-bold':'bg-ink-800 text-ink-500')+'">'+(i+1)+'</span><span class="'+(p[1]?'text-ink-100':'text-ink-500')+'">'+p[0]+'</span>'+(p[1]?'<span class="mr-auto text-tiffany-400 flex-none">'+icon('check','w-4 h-4')+'</span>':'')+'</div>'}).join('')+'</div></div>'
@@ -1135,7 +1125,7 @@ document.getElementById('app').innerHTML=
 +'<div class="pt-16 bg-white text-slate-800 min-h-screen" dir="rtl"><div class="max-w-5xl mx-auto px-4 py-6 flex items-center justify-between border-b border-slate-200"><b class="font-display text-slate-900">'+esc(s.settings.name||'موقع تجريبي')+'</b><div class="hidden md:flex gap-6 text-sm text-slate-500"><span>الرئيسية</span><span>المنتجات</span><span>تواصل معنا</span></div></div>'
 +'<div class="max-w-5xl mx-auto px-4 py-14 text-center"><h1 class="font-display font-extrabold text-3xl text-slate-900 mb-3">مرحبًا بكم في '+esc(s.settings.name||'موقعنا')+'</h1><p class="text-slate-500 max-w-xl mx-auto">جرّب الويدجت الحي واسأل عن المعلومات المضافة في قاعدة المعرفة.</p>'
 +'<div class="grid sm:grid-cols-3 gap-4 mt-10 text-right">'+[['خدمة العملاء','متوفرون دائمًا'],['المنتجات','حسب قاعدة المعرفة'],['الدعم','تحويل بشري عند الحاجة']].map(function(p){return '<div class="rounded-2xl border border-slate-200 p-5 bg-white shadow-sm"><div class="h-28 rounded-xl bg-slate-100 mb-4"></div><b>'+p[0]+'</b><div class="text-tiffany-600 font-bold mt-1">'+p[1]+'</div></div>'}).join('')+'</div></div>'
-+'<div class="max-w-5xl mx-auto px-4 pb-16 text-sm text-slate-500 leading-7">جرّب الـ Grounding: اسأل عن معلومة موجودة في قاعدة المعرفة ثم عن معلومة غير موجودة — سترى الرد الصارم بعدم توفر المعلومة.</div></div><div id="test-widget"></div>';
++'<div class="max-w-5xl mx-auto px-4 pb-16 text-sm text-slate-500 leading-7">جرّب الـ Grounding: اسأل عن معلومة موجودة في قاعدة المعرفة ثم عن معلومة غير موجودة.</div></div><div id="test-widget"></div>';
 var tw=document.getElementById('test-widget');
 if(w.enabled&&tw)mountWidget(tw,w,agent,{fixed:true,persist:true,credit:true});}
 /* ================================================================
@@ -1259,8 +1249,8 @@ sub='اختر القنوات اللي يستخدمها عملاؤك';
 const soon=['واتساب','انستقرام','ماسنجر','إيميل','تيك توك','تيليجرام','هاتف'];
 body='<div class="space-y-3">'
 +'<div class="glass rounded-xl p-4 flex items-center justify-between border border-tiffany-500" style="background:rgba(10,186,181,0.1)"><div class="flex items-center gap-3"><span class="w-9 h-9 rounded-lg bg-tiffany-500/10 text-tiffany-400 flex items-center justify-center">'+icon('widget','w-4 h-4')+'</span><div><div class="text-sm font-bold">ويدجت الموقع</div><div class="text-[11px] text-ink-500">مفعّل وجاهز الآن</div></div></div><span class="text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-2.5 py-1">✓ مفعّل</span></div>'
-+'<div class="grid grid-cols-2 sm:grid-cols-4 gap-2">'+soon.map(function(c){return '<div class="glass rounded-xl p-3 text-center opacity-50 cursor-not-allowed"><div class="text-xs font-semibold">'+c+'</div><div class="text-[9px] text-ink-500 mt-0.5">قريباً</div></div>'}).join('')+'</div>'
-+'<div class="glass rounded-xl p-4 text-xs text-ink-300 flex items-center justify-between flex-wrap gap-2"><span>✨ باقة مجانية · 1 قناة (أي نوع) مشمولة</span><a href="#/app/billing" class="text-tiffany-400 hover:underline">تغيير الباقة</a></div></div>';}
++'<div class="grid grid-cols-2 sm:grid-cols-4 gap-2">'+soon.map(function(c){return '<button type="button" data-action="soon-channel" data-id="'+c+'" class="glass rounded-xl p-3 text-center opacity-60 hover:opacity-90 transition cursor-pointer"><div class="text-xs font-semibold">'+c+'</div><div class="text-[9px] text-ink-500 mt-0.5">قريباً — اضغط للتفاصيل</div></button>'}).join('')+'</div>'
++'<div class="glass rounded-xl p-4 text-xs text-ink-300 flex items-center justify-between flex-wrap gap-2"><span>✨ باقة مجانية · قناة واحدة مشمولة</span><button data-action="go" data-to="#/app/billing" class="text-tiffany-400 hover:underline">عرض الباقات</button></div></div>';}
 else if(step===4){
 title='خلي وكيلك يعرف منتجاتك';
 sub='حط رابط صفحة وحدة ونقراها تلقائياً، أو ارفع ملف، أو اكتب بنفسك.';
@@ -1295,7 +1285,7 @@ body='<div class="space-y-4"><div class="glass rounded-xl p-4 space-y-2 text-sm"
 +(st.obBuilt?'':'<button data-action="ob-build" class="btn-ghost text-xs">إعادة محاولة البناء</button>')+'</div>';}
 else if(step===7){
 title='جرب وكيلك الحي';
-sub='شات حي متصل فعليًا — يجيب من المعرفة الحقيقية التي أضفتها فقط، بدون أي اختراع.';
+sub='شات حي متصل فعليًا — يجيب من المعرفة الحقيقية التي أضفتها فقط.';
 body='<div class="space-y-4"><div class="relative h-[540px] rounded-xl bg-ink-900 border border-ink-800 overflow-hidden grid-bg"><div id="ob-widget-host" class="absolute inset-0"></div></div>'
 +'<div class="flex gap-2 flex-wrap"><button data-action="ob-next" class="btn-primary">وكيلي جاهز</button><button data-action="ob-test-page" class="btn-ghost">المعاينة</button><button data-action="ob-builder" class="btn-ghost">الإعداد</button></div></div>';}
 else if(step===8){
@@ -1332,15 +1322,17 @@ var isDemo=!!(u&&u.demo);
 var navBtns=NAV.map(function(n){
 var active=(page===n[0])||(page==='builder'&&n[0]==='widgets');
 return '<button data-action="go" data-to="#/app'+(n[0]?'/'+n[0]:'')+'" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm transition '+(active?'bg-tiffany-500/10 text-tiffany-300 border border-tiffany-500/30':'text-ink-300 hover:bg-ink-850 border border-transparent')+'">'+icon(n[2],'w-[18px] h-[18px]')+' '+n[1]+(n[0]==='conversations'&&handoffCount()?'<span class="mr-auto text-[10px] bg-amber-500 text-ink-950 font-bold rounded-full px-1.5 py-0.5">'+handoffCount()+'</span>':'')+'</button>'}).join('');
+var connBtn='';
+if(remoteBroken)connBtn='<button data-action="sync-now" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 hover:border-amber-400">'+icon('refresh','w-4 h-4')+' المزامنة متوقفة — اضغط لإعادة الاتصال</button>';
+else if(isRemote())connBtn='<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/20">'+icon('db','w-4 h-4')+' Supabase متصل — الجلسة محفوظة</button>';
+else if(isDemo)connBtn='<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20">'+icon('eye','w-4 h-4')+' وضع تجريبي — محفوظ تلقائيًا</button>';
+else connBtn='<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20">'+icon('db','w-4 h-4')+' وضع محلي — اربط الخلفية</button>';
 document.getElementById('app').innerHTML='<div class="min-h-screen flex">'
 +'<aside id="sidebar" class="fixed lg:sticky top-0 h-screen w-[250px] bg-ink-900 border-l border-ink-800 z-40 flex flex-col transition-transform lg:translate-x-0 max-lg:-translate-x-full flex-none">'
 +'<div class="h-16 flex items-center gap-2 px-5 border-b border-ink-800 font-display font-extrabold flex-none text-sm">'+brandHTML()+'</div>'
 +'<div class="px-5 py-3 text-[11px] text-ink-500 border-b border-ink-800 truncate flex-none">مساحة العمل: <b class="text-ink-300">'+esc(s.settings.name)+'</b></div>'
 +'<nav class="flex-1 overflow-y-auto p-3 space-y-1">'+navBtns+'</nav>'
-+'<div class="p-3 border-t border-ink-800 space-y-1 flex-none">'
-+(isRemote()?'<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/20">'+icon('db','w-4 h-4')+' Supabase متصل — الجلسة محفوظة</button>'
-:(isDemo?'<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20">'+icon('eye','w-4 h-4')+' وضع تجريبي — محفوظ تلقائيًا</button>'
-:'<button data-action="go" data-to="#/setup" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20">'+icon('db','w-4 h-4')+' وضع محلي — اربط الخلفية</button>'))
++'<div class="p-3 border-t border-ink-800 space-y-1 flex-none">'+connBtn
 +'<button data-action="go" data-to="#/test" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm text-ink-300 hover:bg-ink-850">'+icon('globe','w-[18px] h-[18px]')+' موقع تجريبي</button>'
 +'<button data-action="logout" class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm text-red-300 hover:bg-red-500/10">'+icon('out','w-[18px] h-[18px]')+' '+(isDemo?'الخروج من الوضع التجريبي':'تسجيل الخروج')+'</button></div></aside>'
 +'<div class="flex-1 min-w-0"><header class="h-16 sticky top-0 z-30 glass flex items-center justify-between px-4 md:px-8">'
@@ -1383,10 +1375,12 @@ days.push(w.convos.reduce(function(s,c){return s+c.messages.filter(function(m){r
 var max=Math.max.apply(null,days.concat([1]));
 var recent=w.convos.slice(0,4).map(function(c){var ct=w.contacts.find(function(x){return x.id===c.contactId});
 return '<button data-action="go" data-to="#/app/conversations?c='+c.id+'" class="w-full text-right flex items-center gap-3 hover:bg-ink-850 rounded-xl p-2 transition"><div class="w-9 h-9 rounded-full bg-ink-800 flex items-center justify-center text-xs font-bold text-tiffany-300 flex-none">'+esc(((ct&&ct.name)||'ز').charAt(0))+'</div><div class="flex-1 min-w-0"><div class="text-sm font-semibold truncate">'+esc((ct&&ct.name)||'زائر')+'</div><div class="text-[11px] text-ink-500 truncate">'+esc((c.messages[c.messages.length-1]||{}).text||'')+'</div></div>'+statusBadge(c.status)+'</button>'}).join('');
-var banner=isRemote()
+var banner='';
+if(remoteBroken)banner='<div class="mb-4 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2 flex-wrap">'+icon('refresh','w-4 h-4')+' انقطع الاتصال بالخادم — التغييرات محفوظة محليًا. <button data-action="sync-now" class="underline font-bold">إعادة المزامنة الآن</button></div>';
+else banner=isRemote()
 ?'<div class="mb-4 text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2">'+icon('db','w-4 h-4')+' البيانات محفوظة ومتزامنة مع Supabase — Workspace: <span class="ltr">'+esc((w.__wid||'').slice(0,8))+'…</span></div>'
 :(isDemo?'<div class="mb-4 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2 flex-wrap">'+icon('eye','w-4 h-4')+' وضع تجريبي بدون حساب — بياناتك المحلية محفوظة وتبقى بعد إعادة الفتح. <a class="underline font-bold" href="#/signup">أنشئ حسابًا حقيقيًا</a></div>'
-:'<div class="mb-4 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2 flex-wrap">'+icon('bolt','w-4 h-4')+' تعمل الآن على تخزين محلي. <button data-action="go" data-to="#/setup" class="underline font-bold">اربط قاعدة بيانات Supabase →</button></div>');
+:'<div class="mb-4 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2 flex-wrap">'+icon('bolt','w-4 h-4')+' تعمل الآن على تخزين محلي آمن. <button data-action="go" data-to="#/setup" class="underline font-bold">اربط قاعدة بيانات Supabase →</button></div>');
 return banner
 +'<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">'+statCard('chat','المحادثات',w.convos.length,handoffCount()+' بانتظار تحويل بشري')+statCard('users','العملاء',cust.length,interested+' مهتم')+statCard('send','رسائل اليوم',today)+statCard('chart','رسائل الشهر',month)+statCard('bot','Agents',w.agents.length,'الحد في خطتك: '+PLANS[w.plan].agents)+statCard('widget','Widgets',w.widgets.length,w.widgets.filter(function(x){return x.enabled}).length+' نشط')+statCard('bolt','استخدام AI',Math.min(100,Math.round(w.usage.ai/cap*100))+'%',w.usage.ai+' من '+cap)+statCard('shield','الخطة',PLANS[w.plan].name)+'</div>'
 +'<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">'+statCard('users','عملاء محتملون',prospects)+statCard('check','مشترون',buyers)+statCard('chart','معدل التحويل',conv+'%','مشترون ÷ إجمالي العملاء')+statCard('spark','متوسط Lead Score',avg,'من 0 إلى 100')+'</div>'
@@ -1421,7 +1415,7 @@ var w=ws();
 var cards=w.agents.map(function(a){
 var kbCount=w.kb.filter(function(k){return k.agentId===a.id}).length;
 return '<div class="glass rounded-2xl p-6 hover:border-tiffany-500/40 transition"><div class="flex items-start gap-4"><img src="'+(a.avatar||AVT[0])+'" class="w-14 h-14 rounded-2xl object-cover border border-ink-700" alt="" onerror="this.style.display=\'none\'"><div class="flex-1 min-w-0"><h3 class="font-display font-bold">'+esc(a.name)+'</h3><p class="text-xs text-ink-500 mt-0.5">'+esc(a.model)+' • '+esc(a.tone)+'</p></div><button data-action="edit-agent" data-id="'+a.id+'" class="p-2 text-ink-400 hover:text-white hover:bg-ink-800 rounded-lg">'+icon('edit','w-4 h-4')+'</button><button data-action="del-agent" data-id="'+a.id+'" class="p-2 text-red-400 hover:bg-red-500/10 rounded-lg">'+icon('trash','w-4 h-4')+'</button></div><p class="text-sm text-ink-400 leading-6 mt-3 line-clamp-2">'+esc(a.desc)+'</p><div class="flex items-center gap-2 mt-4 text-[11px] text-ink-500 flex-wrap"><span class="bg-ink-850 border border-ink-800 rounded-full px-2.5 py-1">'+esc(a.language)+'</span><span class="bg-ink-850 border border-ink-800 rounded-full px-2.5 py-1">'+kbCount+' مصدر معرفة</span><span class="bg-ink-850 border border-ink-800 rounded-full px-2.5 py-1">'+w.convos.filter(function(c){return c.agentId===a.id}).length+' محادثة</span><span class="bg-ink-850 border border-ink-800 rounded-full px-2.5 py-1">'+w.widgets.filter(function(x){return x.agentId===a.id}).length+' Widget</span></div></div>'}).join('');
-return '<div class="flex items-center justify-between mb-5 flex-wrap gap-3"><p class="text-sm text-ink-400">'+w.agents.length+' من '+PLANS[w.plan].agents+' في خطتك'+(isRemote()?' — الحد مفروض أيضًا من قاعدة البيانات':'')+'</p><button data-action="new-agent" class="btn-primary">'+icon('plus','w-4 h-4')+' Agent جديد</button></div><div class="grid md:grid-cols-2 gap-4">'+(cards||'<div class="md:col-span-2 glass rounded-2xl p-14 text-center text-ink-500">لا يوجد Agents بعد.<br><button data-action="new-agent" class="btn-primary mt-4">أنشئ أول Agent</button></div>')+'</div>';}
+return '<div class="flex items-center justify-between mb-5 flex-wrap gap-3"><p class="text-sm text-ink-400">'+w.agents.length+' من '+PLANS[w.plan].agents+' Agents في خطتك '+PLANS[w.plan].name+(isRemote()?' — الحد مفروض أيضًا من قاعدة البيانات':'')+'</p><button data-action="new-agent" class="btn-primary">'+icon('plus','w-4 h-4')+' Agent جديد</button></div><div class="grid md:grid-cols-2 gap-4">'+(cards||'<div class="md:col-span-2 glass rounded-2xl p-14 text-center text-ink-500">لا يوجد Agents بعد.<br><button data-action="new-agent" class="btn-primary mt-4">أنشئ أول Agent</button></div>')+'</div>';}
 function pgWidgets(){
 var w=ws();
 var cards=w.widgets.map(function(x){var a=w.agents.find(function(g){return g.id===x.agentId});
@@ -1536,7 +1530,7 @@ modal('<h3 class="font-display font-bold mb-3">إضافة نص يدوي</h3><for
 } else {
 modal('<h3 class="font-display font-bold mb-3">إضافة رابط موقع</h3><form id="f-kbm-url" class="space-y-3">'
 +'<label class="lbl2">رابط الموقع *<input name="url" type="url" required class="inp-s ltr" placeholder="https://example.com"></label>'
-+'<div class="text-[10px] text-ink-500">يزحف حتى 10 صفحات ضمن نفس النطاق ويستخرج النص المفيد تلقائيًا. إذا فشل الزحف ستظهر الحالة «فشل» مع السبب.</div>'
++'<div class="text-[10px] text-ink-500">يزحف حتى 10 صفحات ضمن نفس النطاق. إذا تعذرت القراءة الآلية سيفتح لك خيار لصق المحتوى يدويًا.</div>'
 +'<label class="lbl2">الـ Agent المرتبط (عزل المعرفة)<select id="kbm-url-agent" class="inp-s">'+agentOptions('')+'</select></label>'
 +'<div class="flex gap-2"><button class="btn-primary flex-1">إضافة ومزامنة</button><button type="button" data-action="modal-close" class="btn-ghost">إلغاء</button></div></form>');
 }}
@@ -1556,11 +1550,11 @@ return '<div class="glass rounded-2xl p-5"><div class="flex items-start gap-4"><
 +'<div class="flex-1 min-w-0"><div class="flex items-center gap-2 flex-wrap"><b class="text-sm">'+esc(k.name)+'</b>'+kbStatusBadge(k)+'</div>'
 +'<div class="text-[11px] text-ink-500 mt-1 flex flex-wrap gap-x-3 gap-y-1"><span>النوع: '+typeLbl+'</span><span>Agent: '+(ag?esc(ag.name):'مشترك (كل الوكلاء)')+'</span><span>'+cnt+' مقطع</span><span>أُضيف: '+fmtDate(k.createdAt)+'</span>'+(k.lastSync?'<span>آخر مزامنة: '+timeAgo(k.lastSync)+'</span>':'')+(k.size?'<span>الحجم: '+fmtSize(k.size)+'</span>':'')+'</div>'
 +'<p class="text-xs text-ink-400 mt-2 leading-6 line-clamp-2">'+esc(k.content||'')+'</p>'
-+(k.status==='error'?'<div class="text-[11px] text-red-300 mt-1">سبب الفشل: '+esc(k.error||'خطأ غير معروف')+'</div>':'')
++(k.status==='error'?'<div class="text-[11px] text-red-300 mt-1">سبب الفشل: '+esc(k.error||'خطأ غير معروف')+' <button data-action="kb-reprocess" data-id="'+k.id+'" class="text-tiffany-300 underline mr-1">إعادة المحاولة</button></div>':'')
 +'</div><div class="flex gap-1 flex-none">'+acts+'</div></div></div>'}).join('');
 return '<div class="flex items-center justify-between mb-5 flex-wrap gap-3"><div><h2 class="font-display font-bold text-xl">مصادر المعرفة</h2><p class="text-xs text-ink-500 mt-1">كل مصدر معزول حسب الـ Agent — لا تداخل بين الوكلاء. الحالة لا تصبح «جاهز» إلا بعد نجاح المعالجة فعليًا.</p></div><button data-action="kb-add" class="btn-primary">'+icon('plus','w-4 h-4')+' إضافة مصدر</button></div>'
 +kbDiagnostics()
-+'<div class="space-y-3">'+(docs||'<div class="glass rounded-2xl p-12 text-center text-ink-500">لا مصادر بعد — اضغط «إضافة مصدر» وأضف رابط موقعك أو ملفًا أو نصًا.</div>')+'</div>';}
++'<div class="space-y-3">'+(docs||'<div class="glass rounded-2xl p-12 text-center text-ink-500">لا مصادر بعد — <button data-action="kb-add" class="text-tiffany-400 underline">أضف مصدرًا الآن</button>: رابط موقعك، ملف، أو نص يدوي.</div>')+'</div>';}
 function pgAnalytics(){
 var w=ws();var total=w.convos.length||1;
 var closed=w.convos.filter(function(c){return c.status==='closed'}).length;
@@ -1582,8 +1576,9 @@ return '<div class="grid lg:grid-cols-3 gap-4"><div class="lg:col-span-2 glass r
 +'<div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">أكثر المواضيع ورودًا</h3><div class="space-y-2">'+(top.map(function(t,i){return '<div class="flex items-center gap-3"><span class="text-xs text-ink-500 w-4">'+(i+1)+'</span><div class="flex-1 h-7 bg-ink-850 rounded-lg overflow-hidden"><div class="h-full bg-tiffany-500/25 border-l border-tiffany-500/50 rounded-lg flex items-center px-3 text-xs" style="width:'+Math.max(t[1]/top[0][1]*100,15)+'%">'+esc(t[0])+' — '+t[1]+'</div></div></div>'}).join('')||'<p class="text-sm text-ink-500">لا بيانات كافية.</p>')+'</div></div></div>';}
 function pgSettings(){
 var s=ws().settings;
+var teamRows=(s.team||[]).map(function(t,idx){return '<div class="flex items-center justify-between bg-ink-850 border border-ink-800 rounded-xl px-4 py-2.5 text-sm"><span class="ltr">'+esc(t.email)+'</span><span class="flex items-center gap-2"><span class="text-[10px] text-tiffany-300 bg-tiffany-500/10 rounded-full px-2 py-0.5">'+esc(t.role)+'</span><button data-action="del-member" data-id="'+idx+'" class="text-red-400 hover:bg-red-500/10 rounded-lg p-1">'+icon('trash','w-3.5 h-3.5')+'</button></span></div>'}).join('');
 return '<div class="grid lg:grid-cols-2 gap-5 items-start"><div class="glass rounded-2xl p-6 space-y-4"><h3 class="font-display font-bold">ملف مساحة العمل</h3><label class="lbl2">اسم النشاط<input id="s-name" class="inp-s" value="'+esc(s.name)+'"></label><label class="lbl2">نوع النشاط<select id="s-type" class="inp-s">'+['متجر إلكتروني','شركة','عيادة','مطعم','صالون','عقارات','مكتب خدمات','مركز تدريب','أخرى'].map(function(t){return '<option '+(t===s.type?'selected':'')+'>'+t+'</option>'}).join('')+'</select></label><label class="lbl2">اللغة الافتراضية<select id="s-lang" class="inp-s">'+['العربية','English'].map(function(t){return '<option '+(t===s.lang?'selected':'')+'>'+t+'</option>'}).join('')+'</select></label><label class="lbl2">المنطقة الزمنية<select id="s-tz" class="inp-s">'+['Asia/Riyadh','Asia/Dubai','Asia/Kuwait','Africa/Cairo'].map(function(t){return '<option '+(t===s.tz?'selected':'')+'>'+t+'</option>'}).join('')+'</select></label><button data-action="save-settings" class="btn-primary">حفظ الإعدادات</button></div>'
-+'<div class="space-y-5"><div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">الفريق</h3><div class="space-y-2 mb-4">'+(s.team||[]).map(function(t){return '<div class="flex items-center justify-between bg-ink-850 border border-ink-800 rounded-xl px-4 py-2.5 text-sm"><span class="ltr">'+esc(t.email)+'</span><span class="text-[10px] text-tiffany-300 bg-tiffany-500/10 rounded-full px-2 py-0.5">'+esc(t.role)+'</span></div>'}).join('')+'</div><form id="f-team" class="flex gap-2"><input name="email" type="email" required class="inp-s ltr" placeholder="teammate@company.com"><button class="btn-ghost !px-4 flex-none">'+icon('plus','w-4 h-4')+'</button></form></div>'
++'<div class="space-y-5"><div class="glass rounded-2xl p-6"><h3 class="font-display font-bold mb-4">الفريق</h3><div class="space-y-2 mb-4">'+(teamRows||'<p class="text-xs text-ink-500">لا أعضاء بعد.</p>')+'</div><form id="f-team" class="flex gap-2"><input name="email" type="email" required class="inp-s ltr" placeholder="teammate@company.com"><button class="btn-ghost !px-4 flex-none">'+icon('plus','w-4 h-4')+'</button></form></div>'
 +'<div class="glass rounded-2xl p-6 border-red-500/20"><h3 class="font-display font-bold mb-2 text-red-300">منطقة الخطر</h3><p class="text-xs text-ink-500 mb-4">إجراءات لا يمكن التراجع عنها.</p><div class="flex gap-2 flex-wrap"><button data-action="reset-ws" class="btn-ghost !border-red-500/40 !text-red-300">إعادة تعيين البيانات</button><button data-action="del-account" class="btn-ghost !border-red-500/40 !text-red-300">حذف الحساب</button></div></div></div></div>';}
 function pgBilling(){
 var w=ws();var cap=PLANS[w.plan].msgs;var pct=Math.min(100,Math.round(w.usage.ai/cap*100));
@@ -1611,7 +1606,7 @@ document.addEventListener('click',function(e){
 var sbBtn=e.target.closest('[data-action="sb"]');
 if(sbBtn){var s=document.getElementById('sidebar');if(s){s.classList.toggle('max-lg:-translate-x-full')}
 var o=document.getElementById('sb-overlay');if(o)o.classList.toggle('hidden');return}
-/* closest يلتقط الزر حتى لو كان النقر على أيقونة SVG أو النص داخله */
+/* closest يلتقط الزر حتى لو كان النقر على أيقونة SVG أو نص داخل الزر */
 var t=e.target&&e.target.closest?e.target.closest('[data-action]'):null;if(!t)return;
 var a=t.dataset.action,id=t.dataset.id;
 function cur(idv){return ws().widgets.find(function(x){return x.id===idv})}
@@ -1620,14 +1615,22 @@ try{
 if(a==='go')go(t.dataset.to);
 else if(a==='scroll'){e.preventDefault();var el=document.querySelector(t.dataset.to);if(el)el.scrollIntoView({behavior:'smooth'})}
 else if(a==='demo-enter'){
-if(isRemote()){toast('أنت متصل بالخادم — سجّل الدخول أو أنشئ حسابًا حقيقيًا','err');return}
+if(isRemote()){toast('أنت متصل بالخادم — سجّل الدخول أو أنشئ حسابًا حقيقيًا، أو افصل الاتصال لاستخدام وضع الضيف','err');return}
 db.demo=true;if(!db.ws)db.ws=starterKit();persist();
-toast('دخلت في وضع تجريبي بدون حساب — جلستك وبياناتك تبقى محفوظة','ok');go('#/onboarding')}
+toast('دخلت كضيف بدون حساب — جلستك وبياناتك تبقى محفوظة','ok');go('#/onboarding')}
 else if(a==='logout'){
-if(isRemote()){sbClient().auth.signOut()}
-else{db.session=null;db.demo=false;db.ws=null;persist()}
-db.ws=null;remoteUser=null;selConvo=null;draft=null;toast('تم تسجيل الخروج');go('#/')}
-else if(a==='new-agent'){if(ws().agents.length>=PLANS[ws().plan].agents){toast('بلغت حد الـ Agents في خطتك — قم بالترقية','err');go('#/app/billing');return}agentModal()}
+if(isRemote()){try{sbClient().auth.signOut()}catch(e3){}}
+db.session=null;db.demo=false;db.ws=null;persist();
+remoteUser=null;selConvo=null;draft=null;toast('تم تسجيل الخروج');go('#/')}
+else if(a==='local-mode'){useLocalMode()}
+else if(a==='sync-now'){
+if(isRemote()&&db.ws&&db.ws.__wid){remoteBroken=false;save();toast('جارٍ إعادة المزامنة مع الخادم...','ok')}
+else toast('لا يوجد اتصال خادم مهيأ — اربطه من صفحة الخلفية','err')}
+else if(a==='soon-channel'){toast('قناة '+id+' ستتوفر في تحديث قادم — قناة الويدجت مفعّلة لك الآن','ok')}
+else if(a==='new-agent'){
+var lim=PLANS[ws().plan].agents;
+if(ws().agents.length>=lim){toast('بلغت الحد الأقصى ('+lim+' Agents) في خطتك '+PLANS[ws().plan].name+' — قم بالترقية لزيادة العدد','err');go('#/app/billing');return}
+agentModal()}
 else if(a==='edit-agent')agentModal(id);
 else if(a==='del-agent'){if(confirm('حذف هذا الـ Agent؟')){ws().agents=ws().agents.filter(function(x){return x.id!==id});save();route()}}
 else if(a==='new-widget'){if(!ws().agents.length){toast('أنشئ Agent أولًا','err');go('#/app/agents');return}widgetModal()}
@@ -1661,7 +1664,6 @@ syncWidgetToServer(wT).then(function(){toast(wT.enabled?'تم تفعيل الو�
 else if(a==='modal-close')closeModal();
 else if(a==='kb-add'){kbTypeModal()}
 else if(a==='kb-open'){
-/* إصلاح: قراءة data-id بأمان حتى لو كان النقر على SVG أو نص داخل الزر */
 var kbid=(t.dataset&&t.dataset.id)?t.dataset.id:(t.getAttribute?t.getAttribute('data-id'):null);
 kbTypeModalOpen(kbid);}
 else if(a==='kb-diag-log'){
@@ -1710,15 +1712,18 @@ else if(a==='del-contact'){if(confirm('حذف العميل؟')){ws().contacts=ws
 else if(a==='add-tag'){var c5=ws().contacts.find(function(x){return x.id===id});var v=prompt('اسم الوسم:');if(v&&c5){c5.tags=[...new Set((c5.tags||[]).concat([v]))];save();route()}}
 else if(a==='note'){var c6=ws().contacts.find(function(x){return x.id===id});if(c6)modal('<h3 class="font-display font-bold mb-3">ملاحظات '+esc(c6.name)+'</h3><textarea id="note-ta" rows="5" class="inp-s w-full">'+esc(c6.notes||'')+'</textarea><button data-action="note-save" data-id="'+c6.id+'" class="btn-primary w-full mt-3">حفظ</button>')}
 else if(a==='note-save'){var c7=ws().contacts.find(function(x){return x.id===id});if(c7){c7.notes=document.getElementById('note-ta').value;save();closeModal();toast('تم حفظ الملاحظات','ok')}}
+else if(a==='del-member'){var tm=ws().settings.team;if(tm){tm.splice(parseInt(id,10),1);save();toast('تمت إزالة العضو','ok');route()}}
 else if(a==='av'){if(draft){draft.avatar=t.dataset.v;route()}}
 else if(a==='rm-logo'){if(draft){draft.logo='';route()}}
 else if(a==='tg'){if(draft){var k=t.dataset.b;draft[k]=!draft[k];route()}}
 else if(a==='save-settings'){ws().settings.name=document.getElementById('s-name').value;ws().settings.type=document.getElementById('s-type').value;ws().settings.lang=document.getElementById('s-lang').value;ws().settings.tz=document.getElementById('s-tz').value;save();toast('تم حفظ الإعدادات','ok')}
 else if(a==='reset-ws'){if(confirm('سيتم حذف كل البيانات وإعادة بيانات البداية. متابعة؟')){var wid0=db.ws&&db.ws.__wid;db.ws=starterKit();if(wid0)db.ws.__wid=wid0;save();selConvo=null;draft=null;toast('تمت إعادة التعيين','ok');route()}}
-else if(a==='del-account'){if(isRemote()){toast('حذف الحساب يتم من إعدادات المصادقة في Supabase','err')}else if(!PROD&&confirm('حذف الحساب نهائيًا؟')){db.users=db.users.filter(function(u){return u.id!==db.session});db.session=null;db.ws=null;persist();go('#/')}else{toast('حذف الحساب متاح فقط للحسابات الحقيقية عبر الخادم','err')}}
+else if(a==='del-account'){
+if(isRemote()){toast('حذف الحساب يتم من إعدادات المصادقة في Supabase','err')}
+else if(confirm('حذف الحساب نهائيًا من هذا الجهاز؟')){db.users=db.users.filter(function(u){return u.id!==db.session});db.session=null;db.ws=null;persist();go('#/')}}
 else if(a==='choose-plan'){ws().plan=id;ws().invoices.unshift({id:uid('inv_'),plan:PLANS[id].name,amount:PLANS[id].price,date:now(),status:'مدفوعة'});save();toast('تم تغيير خطتك إلى '+PLANS[id].name+' 🎉 (الدفع الحقيقي في المرحلة التالية)','ok');route()}
 else if(a==='inv')toast('تم تجهيز الفاتورة (نسخة عرض)','ok');
-else if(a==='sb-disconnect'){cfg=null;sb=null;remoteBroken=false;try{localStorage.removeItem('aown_cfg')}catch(e2){}toast('تم فصل الاتصال — العودة للوضع المحلي');route()}
+else if(a==='sb-disconnect'){cfg=null;sb=null;remoteBroken=false;try{localStorage.removeItem('aown_cfg')}catch(e2){}toast('تم فصل الاتصال — العودة للوضع المحلي','ok');route()}
 else if(a==='eng-tab'){engTab=id;route()}
 else if(a==='copy-eng'){if(engTab==='steps'){var tmp=document.createElement('div');tmp.innerHTML=ENG_STEPS;copyText(tmp.textContent.trim())}else copyText(engSource(engTab))}
 else if(a==='sync-widget'){
@@ -1733,6 +1738,8 @@ if(isRemote()){
 sbDeleteRow('widgets',id).then(function(){toast('تم حذف الويدجت من قاعدة البيانات ✔','ok');save();route()})
 .catch(function(err){toast('حُذف محليًا لكن فشل الحذف من قاعدة البيانات: '+err.message,'err');save();route()});
 }else{save();route()}}}
+else if(a==='w-open'||a==='w-close'){/* تُعالج داخل mountWidget */}
+else {console.warn('إجراء غير معروف:',a)}
 }catch(err){console.error(err);toast('تعذر تنفيذ العملية','err')}});
 document.addEventListener('input',function(e){
 var el=e.target;if(!el)return;
@@ -1774,54 +1781,73 @@ c.from('workspaces').select('id',{count:'exact',head:true}).then(function(res){
 var st=document.getElementById('sb-status');
 if(res.error){
 var msg=res.error.message||'';
-if(/policy|permission|42501/i.test(msg)){toast('متصل ✔ لكن سياسات RLS غير مفعلة — شغّل مخطط SQL كاملًا','err')}
+if(isNetErr(msg)){toast('فشل الاتصال بالشبكة — تحقق من الإنترنت أو تابع بالوضع المحلي','err')}
+else if(/policy|permission|42501/i.test(msg)){toast('متصل ✔ لكن سياسات RLS غير مفعلة — شغّل مخطط SQL كاملًا','err')}
 else if(/does not exist|PGRST|relation/i.test(msg)){toast('متصل ✔ لكن الجداول غير موجودة — شغّل مخطط SQL أولًا','err')}
 else{toast('فشل الاتصال: '+msg,'err')}
 if(st)st.innerHTML='<div class="glass rounded-2xl p-5 text-sm text-red-300 border-red-500/30">⚠️ '+esc(msg)+'</div>';
 }else{
 toast('الاتصال ناجح وقاعدة البيانات جاهزة ✔','ok');
 if(st)st.innerHTML='<div class="glass rounded-2xl p-5 text-sm text-emerald-300 border-emerald-500/30">✅ Supabase جاهز — أنشئ حسابًا جديدًا وسيفتح معالج التهيئة تلقائيًا.</div>';
-route();}});
+route();}}).catch(function(err){toast('فحص الاتصال فشل: '+arErr(err&&err.message),'err')});
 return}
 if(f.id==='f-login'){
 var em=String(fd.get('email')).trim(),pw=fd.get('pass');
 if(isRemote()){
 var b=document.getElementById('b-login');if(b){b.disabled=true;b.textContent='جارٍ الدخول...'}
 sbClient().auth.signInWithPassword({email:em,password:pw}).then(async function(res){
-if(res.error){toast(res.error.message==='Invalid login credentials'?'بيانات الدخول غير صحيحة':res.error.message,'err');if(b){b.disabled=false;b.textContent='تسجيل الدخول'}return}
+if(res.error){
+if(isNetErr(res.error.message)){authNetFail(res.error.message)}
+else toast(res.error.message==='Invalid login credentials'?'بيانات الدخول غير صحيحة':res.error.message,'err');
+if(b){b.disabled=false;b.textContent='تسجيل الدخول'}return}
 remoteUser=res.data.user;db.demo=false;
 toast('جارٍ تحميل مساحة العمل...');
-var ok=await loadRemote();
-if(ok){toast('مرحبًا بعودتك 👋 — جلستك محفوظة','ok');go((db.ws&&db.ws.settings.onboarded===true)?'#/app':'#/onboarding')}});
+var ok=false;try{ok=await loadRemote()}catch(eL){console.error(eL)}
+if(!ok){if(!db.ws){db.ws=starterKit();db.ws.__offline=true;persist()}remoteBroken=true;toast('تعذر تحميل بيانات الخادم — تعمل الآن بالوضع المحلي مؤقتًا','err')}
+toast('مرحبًا بعودتك 👋 — جلستك محفوظة','ok');go((db.ws&&db.ws.settings.onboarded===true)?'#/app':'#/onboarding')}).catch(function(err){
+if(b){b.disabled=false;b.textContent='تسجيل الدخول'}
+if(isNetErr(err&&err.message)){authNetFail(err.message)}else toast('خطأ غير متوقع أثناء الدخول','err')});
 return}
-if(PROD){toast('تسجيل الدخول الحقيقي يتطلب الاتصال بالخادم — اربط Supabase أو استخدم الوضع التجريبي','err');return}
+/* وضع محلي — بدون خادم */
 var u=db.users.find(function(x){return x.email===em&&x.pw===hashPw(pw)});
 if(!u){toast('بيانات الدخول غير صحيحة','err');return}
-db.session=u.id;persist();toast('مرحبًا بعودتك 👋 — جلستك محفوظة','ok');go((db.ws&&db.ws.settings.onboarded===true)?'#/app':'#/onboarding')}
+db.session=u.id;db.demo=false;persist();
+if(!db.ws)db.ws=starterKit();persist();
+toast('مرحبًا بعودتك 👋 — جلستك محفوظة','ok');go((db.ws&&db.ws.settings.onboarded===true)?'#/app':'#/onboarding')}
 else if(f.id==='f-signup'){
 var em2=String(fd.get('email')).trim(),pw2=fd.get('pass');
 if(isRemote()){
 var b2=document.getElementById('b-signup');if(b2){b2.disabled=true;b2.textContent='جارٍ إنشاء الحساب...'}
 sbClient().auth.signUp({email:em2,password:pw2,options:{data:{name:fd.get('name'),company:fd.get('company')}}}).then(async function(res){
-if(res.error){toast(res.error.message,'err');if(b2){b2.disabled=false;b2.textContent='إنشاء الحساب والبدء'}return}
+if(res.error){
+if(isNetErr(res.error.message)){authNetFail(res.error.message)}
+else toast(res.error.message,'err');
+if(b2){b2.disabled=false;b2.textContent='إنشاء الحساب والبدء'}return}
 if(!res.data.session){toast('تم إرسال رابط تفعيل إلى بريدك — فعّل الحساب ثم سجّل الدخول','ok');if(b2){b2.disabled=false;b2.textContent='إنشاء الحساب والبدء'}go('#/login');return}
 remoteUser=res.data.user;db.demo=false;
 toast('جارٍ إنشاء مساحة العمل في قاعدة البيانات...');
-var ok=await loadRemote();
-if(ok){var s=ws();s.settings.name=String(fd.get('company')).trim()||s.settings.name;s.settings.type=fd.get('type');save();toast('تم إنشاء حسابك في إدارة ســوشـــيــــال 🎉 لنجهّز وكيلك','ok');go('#/onboarding')}});
+var ok=false;try{ok=await loadRemote()}catch(eL2){console.error(eL2)}
+if(!ok){if(!db.ws){db.ws=starterKit();db.ws.__offline=true;persist()}remoteBroken=true}
+if(db.ws){var s=ws();s.settings.name=String(fd.get('company')).trim()||s.settings.name;s.settings.type=fd.get('type');save()}
+toast('تم إنشاء حسابك في إدارة ســوشـــيــــال 🎉 لنجهّز وكيلك','ok');go('#/onboarding')}).catch(function(err){
+if(b2){b2.disabled=false;b2.textContent='إنشاء الحساب والبدء'}
+if(isNetErr(err&&err.message)){authNetFail(err.message)}else toast('خطأ غير متوقع أثناء إنشاء الحساب','err')});
 return}
-if(PROD){toast('إنشاء الحسابات يتم عبر الخادم فقط — اربط Supabase أو جرّب الوضع التجريبي','err');return}
+/* وضع محلي — بدون خادم */
 if(db.users.some(function(x){return x.email===em2})){toast('البريد مسجل مسبقًا','err');return}
 var nu={id:uid('u_'),name:String(fd.get('name')).trim(),email:em2,pw:hashPw(pw2),createdAt:now()};
-db.users.push(nu);db.session=nu.id;db.ws=starterKit();db.ws.settings.name=String(fd.get('company')).trim();db.ws.settings.type=fd.get('type');persist();
+db.users.push(nu);db.session=nu.id;db.demo=false;db.ws=starterKit();db.ws.settings.name=String(fd.get('company')).trim();db.ws.settings.type=fd.get('type');persist();
 toast('تم إنشاء مساحة عملك 🎉 لنجهّز وكيلك','ok');go('#/onboarding')}
 else if(f.id==='f-forgot'){
 var em3=String(fd.get('email')).trim();
 if(isRemote()){
 sbClient().auth.resetPasswordForEmail(em3,{redirectTo:location.origin+'#/login'}).then(function(res){
-if(res.error){toast(res.error.message,'err')}else toast('إن وجد الحساب، وصلك رابط الاستعادة على بريدك. افتح الرابط لتعيين كلمة مرور جديدة.','ok')});
+if(res.error){
+if(isNetErr(res.error.message)){authNetFail(res.error.message)}
+else toast(res.error.message,'err')}
+else toast('إن وجد الحساب، وصلك رابط الاستعادة على بريدك. افتح الرابط لتعيين كلمة مرور جديدة.','ok')}).catch(function(err){authNetFail(err&&err.message)});
 return}
-toast('استعادة كلمة المرور تتطلب الاتصال بقاعدة البيانات — اربط Supabase أولًا','err')}
+toast('استعادة كلمة المرور تتطلب خادمًا — في الوضع المحلي يمكنك إنشاء حساب جديد','err')}
 else if(f.id==='f-newpass'){
 var np=fd.get('pass');
 if(String(np).length<6){toast('كلمة المرور يجب أن تكون 6 أحرف على الأقل','err');return}
@@ -1875,28 +1901,14 @@ var dU={id:uid('kb_'),name:urlU,type:'url',agentId:agU?agU.value:'',content:'ج�
 ws().kb.unshift(dU);save();closeModal();refreshKbUI();
 processUrl(urlU,dU);
 return}
-else if(f.id==='f-kb-url'){
-var url=String(fd.get('url')).trim();
-var agentIdU=fd.get('agentId')||'';
-var d2={id:uid('kb_'),name:url,type:'url',agentId:agentIdU,content:'جارٍ الزحف واستخراج المعلومات...',status:'processing',chunks:[],chunkCount:0,createdAt:now(),error:''};
-ws().kb.unshift(d2);save();refreshKbUI();
-processUrl(url,d2);
-return}
-else if(f.id==='f-kb-file'){
-var fileIn=document.getElementById('kb-file2');
-var file2=fileIn?fileIn.files[0]:null;
-if(!file2){toast('اختر ملفًا أولًا','err');return}
-var agentIdF=fd.get('agentId')||'';
-refreshKbUI();
-processFile(file2,agentIdF);
-return}
-else if(f.id==='f-kb-text'){
-var content=String(fd.get('content')||'').trim();
-if(!content){toast('اكتب المعلومات أولًا','err');return}
-var title=String(fd.get('title')||'').trim();
-var agentIdT=fd.get('agentId')||'';
-var okT=await processTextDoc(title,content,agentIdT);
-if(okT)f.reset();
+else if(f.id==='f-urlfallback'){
+var docF=ws().kb.find(function(x){return x.id===fd.get('docId')});
+var cntF=String(fd.get('content')||'').trim();
+if(!docF){closeModal();return}
+if(!cntF){toast('الصق محتوى الموقع أولًا','err');return}
+docF.type='text';docF.content=cntF;docF.error='';
+closeModal();
+reIngestDoc(docF);
 return}
 else if(f.id==='f-kb-edit'){
 var docU=ws().kb.find(function(x){return x.id===fd.get('id')});
@@ -1911,7 +1923,7 @@ return}
 else if(f.id==='f-dash-msg'){var cd=ws().convos.find(function(x){return x.id===selConvo});if(!cd)return;
 var txt=String(fd.get('m')||'').trim();if(!txt)return;
 cd.messages.push({from:'team',text:txt,at:now()});cd.updatedAt=now();save();route()}
-else if(f.id==='f-team'){ws().settings.team.push({email:String(fd.get('email')).trim(),role:'عضو'});save();toast('تمت دعوة العضو','ok');route()}
+else if(f.id==='f-team'){ws().settings.team.push({email:String(fd.get('email')).trim(),role:'عضو'});save();toast('تمت إضافة العضو','ok');route()}
 }catch(err){console.error(err);toast('تعذر تنفيذ العملية','err')}});
 /* ================= Boot ================= */
 window.addEventListener('error',function(ev){console.error('Social runtime error:',ev.message)});
@@ -1921,7 +1933,8 @@ loadDB();
 if(!isRemote()&&db.demo&&!db.ws){db.ws=starterKit();persist()}
 const c=sbClient();
 if(c){
-const s0=await c.auth.getSession();
+let s0=null;
+try{s0=await c.auth.getSession()}catch(eS){console.warn('session fetch failed:',eS)}
 remoteUser=(s0&&s0.data&&s0.data.session)?s0.data.session.user:null;
 if(remoteUser)db.demo=false;
 c.auth.onAuthStateChange(function(evt,session){
@@ -1929,9 +1942,17 @@ if(evt==='PASSWORD_RECOVERY'){
 modal('<h3 class="font-display font-bold text-lg mb-2">تعيين كلمة مرور جديدة</h3><p class="text-xs text-ink-400 mb-4">تم التحقق من بريدك عبر رابط الاستعادة. اختر كلمة مرور جديدة لحسابك.</p><form id="f-newpass" class="space-y-3"><label class="lbl2">كلمة المرور الجديدة (6 أحرف على الأقل)<input name="pass" type="password" minlength="6" required class="inp-s" placeholder="••••••••"></label><button class="btn-primary w-full">حفظ كلمة المرور الجديدة</button></form>');
 return;}
 var nu=session?session.user:null;
-if(nu&&nu.id!==(remoteUser&&remoteUser.id)){remoteUser=nu;db.demo=false;loadRemote().then(route)}
+if(nu&&nu.id!==(remoteUser&&remoteUser.id)){remoteUser=nu;db.demo=false;loadRemote().catch(function(){}).then(route)}
 else if(!nu&&remoteUser){remoteUser=null;db.ws=null;route()}});
-if(remoteUser){await loadRemote()}
+if(remoteUser){
+var lok=false;
+try{lok=await loadRemote()}catch(eL){console.error('loadRemote failed:',eL)}
+if(!lok){
+/* انقطاع الخادم: مساحة عمل محلية مؤقتة حتى يعود الاتصال */
+if(!db.ws){db.ws=starterKit();db.ws.__offline=true;persist()}
+remoteBroken=true;
+toast('تعذر الوصول للخادم — تعمل الآن بالوضع المحلي مؤقتًا','err');}
+}
 }
 route();
 }catch(err){
